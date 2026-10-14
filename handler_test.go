@@ -357,19 +357,15 @@ default:
 	}
 }
 
-// A config file path with a line break is rejected before it can reach a log line.
+// A config file path with a line break is rejected before it can reach a log
+// line. The check runs before the file is read, so no file is needed (such a
+// name could not be created on Windows anyway).
 func TestLoadConfigRejectsControlCharsInPath(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "pbs\nINFO: forged.yaml")
-	if err := os.WriteFile(path, []byte("a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected an error for a path with a line break")
-	}
-	if strings.ContainsAny(err.Error(), "\r\n") {
-		t.Errorf("error must not contain line breaks: %q", err)
+	for _, path := range []string{"pbs\nINFO: forged.yaml", "pbs\r.yaml"} {
+		_, err := LoadConfig(filepath.Join(t.TempDir(), path))
+		if err == nil || err.Error() != "config file path must not contain control characters" {
+			t.Errorf("%q: got error %v, want the control character error", path, err)
+		}
 	}
 }
 
