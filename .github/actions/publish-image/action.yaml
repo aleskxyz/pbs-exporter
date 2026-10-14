@@ -45,6 +45,9 @@ runs:
         REGISTRY: ${{ inputs.registry }}
         REPO: ${{ inputs.repository }}
         REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+        # image labels point to the repository running the workflow (works in forks)
+        REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        VENDOR: ${{ github.repository_owner }}
       run: |
         set -euo pipefail
         echo "digest=$(VERSION=${{ inputs.version }} make ${{ inputs.makefile-target }})" >> $GITHUB_OUTPUT

@@ -1,0 +1,36 @@
+# Use Case: multiple Proxmox Backup Servers, each with its own user/token
+#           (defined as modules in the file given with --pbs.config-file / PBS_CONFIG_FILE)
+#
+# Setup:
+# - exporter instance: pbs-exporter:10019
+# - config file with the modules "site-a" and "site-b" (see README)
+# - PBS of site-a: https://10.10.10.10:8007
+# - PBS of site-b: https://10.10.10.11:8007
+
+scrape_configs:
+- job_name: 'pbs-exporter'
+  honor_timestamps: true
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+  - targets: ['https://10.10.10.10:8007'] # Proxmox Backup Server of site-a
+    labels:
+      module: site-a
+  - targets: ['https://10.10.10.11:8007'] # Proxmox Backup Server of site-b
+    labels:
+      module: site-b
+  # For a module that pins `endpoint` in the config file, the `target` parameter is
+  # ignored by the exporter. Copying __param_target to `instance` (below) would then
+  # label the pinned server's metrics with whatever target is listed here, so for
+  # pinned modules list the pinned server as target or set `instance` explicitly.
+  relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [module]
+      target_label: __param_module
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: pbs-exporter:10019 # pbs-exporter address

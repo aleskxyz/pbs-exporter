@@ -64,6 +64,9 @@ You can use the following flags to configure the exporter. All flags can also be
 | `pbs.insecure`       | `PBS_INSECURE`       | Disable TLS certificate verification                 | `false`                                                |
 | `pbs.metrics-path`   | `PBS_METRICS_PATH`   | Path under which to expose metrics                   | `/metrics`                                             |
 | `pbs.listen-address` | `PBS_LISTEN_ADDRESS` | Address to listen on for web interface and telemetry | `:10019`                                               |
+| `pbs.config-file`    | `PBS_CONFIG_FILE`    | YAML file with named modules (see [Modules](#modules-different-credentials-per-proxmox-backup-server)) |                         |
+
+If `pbs.config-file` / `PBS_CONFIG_FILE` is set, the connection settings come from that file only: `pbs.api.token`, `pbs.api.token.name`, `pbs.endpoint`, `pbs.username`, `pbs.timeout` and `pbs.insecure` (and their environment variables, including the `*_FILE` variants) are ignored.
 
 ### Running on PBS (systemd)
 The Prometheus-pbs-exporter can also simply be installed on a Proxmox Backup Server instead of spawning an additional Docker container.
@@ -116,6 +119,38 @@ This is useful if you are using Prometheus and want to monitor multiple Proxmox 
 You find examples for Prometheus static configuration in the [prometheus/static-config](prometheus/static-config) directory.
 
 :warning: **Important**: if `pbs.endpoint` or `PBS_ENDPOINT` is set, the `target` parameter is ignored.
+
+## Modules: different credentials per Proxmox Backup Server
+
+The flags and environment variables above define a single set of credentials. If your Proxmox Backup Servers do not share one API token,
+define named *modules* in a YAML file (same idea as the `module` parameter of [prometheus-pve-exporter](https://github.com/prometheus-pve/prometheus-pve-exporter))
+and pass `--pbs.config-file` / `PBS_CONFIG_FILE`:
+
+```yaml
+site-a:
+  user: root@pam
+  token_name: pbs-exporter
+  token_value: 00000000-0000-0000-0000-000000000000
+  insecure: true      # optional, skip TLS verification for this module only (default false)
+  timeout: 5s         # optional, timeout of each request to the PBS (default 5s, must be > 0)
+site-b:
+  user: monitoring@pbs
+  token_name: prometheus
+  token_value: 11111111-1111-1111-1111-111111111111
+  endpoint: https://10.10.10.11:8007   # optional, pins the module to one PBS, the `target` parameter is then ignored
+```
+
+A scrape selects the module and the server with URL parameters: `http://localhost:10019/metrics?module=site-a&target=https://10.10.10.10:8007`.
+See [prometheus/static-config/multiple-modules.yaml](prometheus/static-config/multiple-modules.yaml) for a Prometheus configuration.
+
+- `user`, `token_name` and `token_value` are required for every module and must not contain control characters (e.g. use `token_value: abc`, not a `|` block, which adds a newline). Unknown keys, duplicate keys and empty or null (`~`) module names are rejected. The file must contain a single YAML document.
+- With a config file, the connection flags/environment variables are ignored (see above). Settings are never inherited from them: `insecure` defaults to `false`, `timeout` to `5s`.
+- Without `module` the module `default` is used. With a config file it only exists if the file defines a module named `default`; otherwise a scrape without `module` returns HTTP 400.
+- `endpoint` and `target` must be a base URL (`http(s)://host[:port]`, a trailing `/` is allowed); a path, query, fragment or user info is rejected. An invalid `target` returns HTTP 400.
+- `timeout` applies to each request to the PBS. One scrape makes several requests, and the exporter's HTTP server stops writing a response after 10s, so keep `timeout` (and the number of datastores) well below your `scrape_timeout`.
+- Pin a module with `endpoint` if the exporter is reachable by anything other than your Prometheus: otherwise whoever can call it can make it send the module's token to any `target`. For a pinned module, `target` is ignored: do not copy it into the `instance` label, set `instance` explicitly instead (see the example).
+- Requests to the PBS of a config file module do not follow HTTP redirects (a redirect makes the scrape fail with `pbs_up 0`), so the token is only sent to `endpoint` / `target`.
+- An unknown module returns HTTP 400. Without a config file, the `module` parameter is ignored, as before.
 
 ## Node metrics
 
