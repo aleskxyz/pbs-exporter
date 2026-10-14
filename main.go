@@ -956,11 +956,12 @@ func main() {
 
 		// debug
 		if *loglevel == "debug" {
-			log.Printf("DEBUG: Using config file: %s", *configFile)
+			log.Printf("DEBUG: Using config file: %s", strings.ReplaceAll(strings.ReplaceAll(*configFile, "\n", ""), "\r", ""))
 			for _, name := range moduleNames(modules) {
 				mc := cfg[name]
 				log.Printf("DEBUG: Module %s: user %s, token name %s, endpoint %s, timeout %s, insecure %t",
-					name, mc.User, mc.TokenName, mc.Endpoint, modules[name].client.Timeout, mc.Insecure)
+					strings.ReplaceAll(strings.ReplaceAll(name, "\n", ""), "\r", ""),
+					mc.User, mc.TokenName, mc.Endpoint, modules[name].client.Timeout, mc.Insecure)
 			}
 		}
 	} else {
@@ -1009,7 +1010,7 @@ func main() {
 	}
 
 	if *configFile != "" {
-		log.Printf("INFO: Modules: %s", strings.Join(moduleNames(modules), ", "))
+		log.Printf("INFO: Modules: %s", strings.ReplaceAll(strings.ReplaceAll(strings.Join(moduleNames(modules), ", "), "\n", ""), "\r", ""))
 	}
 	log.Printf("INFO: Listening on: %s", *listenAddress)
 	log.Printf("INFO: Metrics path: %s", *metricsPath)

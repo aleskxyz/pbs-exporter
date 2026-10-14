@@ -56,6 +56,10 @@ type Config map[string]ModuleConfig
 
 // LoadConfig reads and parses a YAML config file.
 func LoadConfig(path string) (Config, error) {
+	// the path is logged, also as part of the read error
+	if hasControlChar(path) {
+		return nil, errors.New("config file path must not contain control characters")
+	}
 	// #nosec G304 G703 -- path is set by the operator via flag/env, not untrusted input
 	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
@@ -95,6 +99,11 @@ func ParseConfig(data []byte) (Config, error) {
 	for name, m := range cfg {
 		if name == "" {
 			invalid = append(invalid, "  - module name must not be empty")
+			continue
+		}
+		// module names are logged; the name itself is not part of the message
+		if hasControlChar(name) {
+			invalid = append(invalid, "  - module name must not contain control characters")
 			continue
 		}
 		if m.User == "" || m.TokenName == "" || m.TokenValue == "" {

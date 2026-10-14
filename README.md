@@ -144,7 +144,7 @@ site-b:
 A scrape selects the module with the `module` URL parameter: `http://localhost:10019/metrics?module=site-a`.
 See [prometheus/static-config/multiple-modules.yaml](prometheus/static-config/multiple-modules.yaml) for a Prometheus configuration.
 
-- `user`, `token_name`, `token_value` and `endpoint` are required for every module. `user`, `token_name` and `token_value` must not contain control characters (e.g. use `token_value: abc`, not a `|` block, which adds a newline). Unknown keys, duplicate keys and empty or null (`~`) module names are rejected. The file must contain a single YAML document.
+- `user`, `token_name`, `token_value` and `endpoint` are required for every module. `user`, `token_name` and `token_value` must not contain control characters (e.g. use `token_value: abc`, not a `|` block, which adds a newline). Unknown keys, duplicate keys and empty, null (`~`) or control character containing module names are rejected. The file must contain a single YAML document.
 - `endpoint` must be a base URL (`http(s)://host[:port]`, a trailing `/` is allowed); a path, query, fragment or user info is rejected.
 - With a config file, the `target` parameter is ignored: a module always scrapes its `endpoint`, so callers of the exporter can not make it send a module's token to another server. Do not copy `target` into the `instance` label, set `instance` explicitly instead (see the example).
 - With a config file, the connection flags/environment variables are ignored (see above). Settings are never inherited from them: `insecure` defaults to `false`, `timeout` to `5s`.

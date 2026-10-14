@@ -319,6 +319,8 @@ default:
 		"second doc":       mod + "---\n~\n---\nb: 1\n",
 		"null key":         "~:\n" + body + "b:\n" + body,
 		"null word key":    "null:\n" + body,
+		"newline name":     "\"a\\nINFO: forged\":\n" + body,
+		"cr name key":      "\"a\\r\":\n" + body,
 		"block token":      "a:\n  user: u\n  token_name: n\n  endpoint: https://pbs:8007\n  token_value: |\n    v\n",
 		"tab user":         "a:\n  user: \"u\\tx\"\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
 		"cr name":          "a:\n  user: u\n  token_name: \"n\\r\"\n  token_value: v\n  endpoint: https://pbs:8007\n",
@@ -352,6 +354,22 @@ default:
 	}
 	if got := cfg["a"].Endpoint; got != "https://pbs:8007" {
 		t.Errorf("endpoint = %q, want it without the trailing slash", got)
+	}
+}
+
+// A config file path with a line break is rejected before it can reach a log line.
+func TestLoadConfigRejectsControlCharsInPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pbs\nINFO: forged.yaml")
+	if err := os.WriteFile(path, []byte("a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected an error for a path with a line break")
+	}
+	if strings.ContainsAny(err.Error(), "\r\n") {
+		t.Errorf("error must not contain line breaks: %q", err)
 	}
 }
 
