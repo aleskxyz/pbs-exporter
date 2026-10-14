@@ -64,11 +64,11 @@ release:
   prerelease: auto
   draft: true
   footer: |
-    **Full Changelog**: https://github.com/{{ envOrDefault "GITHUB_REPOSITORY" "natrontech/pbs-exporter" }}/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/{{ .Env.GITHUB_REPOSITORY }}/compare/{{ .PreviousTag }}...{{ .Tag }}
 
     **Docker Images**
-    - `ghcr.io/{{ tolower (envOrDefault "GITHUB_REPOSITORY_OWNER" "natrontech") }}/{{ .ProjectName }}:v{{ .Version }}`
-    {{ if not .Prerelease }}- `ghcr.io/{{ tolower (envOrDefault "GITHUB_REPOSITORY_OWNER" "natrontech") }}/{{ .ProjectName }}:latest`{{ end }}
+    - `ghcr.io/{{ tolower .Env.GITHUB_REPOSITORY_OWNER }}/{{ .ProjectName }}:v{{ .Version }}`
+    {{ if not .Prerelease }}- `ghcr.io/{{ tolower .Env.GITHUB_REPOSITORY_OWNER }}/{{ .ProjectName }}:latest`{{ end }}
 
 # github changelog for new release
 changelog:
