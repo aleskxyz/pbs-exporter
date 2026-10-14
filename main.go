@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const promNamespace = "pbs"
@@ -32,15 +31,6 @@ var Commit = "none"
 var BuildTime = "unknown"
 
 var (
-	tr = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
-	}
-	client = &http.Client{
-		Transport: tr,
-	}
-
 	// Flags
 	endpoint = flag.String("pbs.endpoint", "",
 		"Proxmox Backup Server endpoint")
@@ -60,6 +50,8 @@ var (
 		"Address on which to expose metrics")
 	loglevel = flag.String("pbs.loglevel", "info",
 		"Loglevel")
+	configFile = flag.String("pbs.config-file", "",
+		"Path to a YAML file with named modules (credentials per Proxmox Backup Server), selected per scrape with ?module=")
 	showVersion = flag.Bool("version", false, "Show version and exit")
 
 	// Metrics
@@ -268,8 +260,10 @@ type HostResponse struct {
 }
 
 type Exporter struct {
+	ctx                 context.Context
 	endpoint            string
 	authorizationHeader string
+	client              *http.Client
 }
 
 func ReadSecretFile(secretfilename string) string {
@@ -291,10 +285,12 @@ func ReadSecretFile(secretfilename string) string {
 	return line.Text()
 }
 
-func NewExporter(endpoint string, username string, apitoken string, apitokenname string) *Exporter {
+func NewExporter(ctx context.Context, endpoint string, module *Module) *Exporter {
 	return &Exporter{
+		ctx:                 ctx,
 		endpoint:            endpoint,
-		authorizationHeader: "PBSAPIToken=" + username + "!" + apitokenname + ":" + apitoken,
+		authorizationHeader: module.authorizationHeader,
+		client:              module.client,
 	}
 }
 
@@ -334,7 +330,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			up, prometheus.GaugeValue, 0,
 		)
-		log.Println(err)
+		log.Println(strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\n", ""), "\r", ""))
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(
@@ -352,7 +348,7 @@ func (e *Exporter) collectFromAPI(ch chan<- prometheus.Metric) error {
 	}
 
 	// get datastores
-	req, err := http.NewRequest("GET", e.endpoint+datastoreUsageApi, nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreUsageApi, nil)
 	if err != nil {
 		return err
 	}
@@ -367,7 +363,7 @@ func (e *Exporter) collectFromAPI(ch chan<- prometheus.Metric) error {
 	}
 
 	// make request and show output
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -423,7 +419,7 @@ func (e *Exporter) collectFromAPI(ch chan<- prometheus.Metric) error {
 
 func (e *Exporter) getVersion(ch chan<- prometheus.Metric) error {
 	// get version
-	req, err := http.NewRequest("GET", e.endpoint+versionApi, nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+versionApi, nil)
 	if err != nil {
 		return err
 	}
@@ -438,7 +434,7 @@ func (e *Exporter) getVersion(ch chan<- prometheus.Metric) error {
 	}
 
 	// make request and show output
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -477,7 +473,7 @@ func (e *Exporter) getVersion(ch chan<- prometheus.Metric) error {
 }
 
 func (e *Exporter) getNodeSubscriptionMetrics(ch chan<- prometheus.Metric) error {
-	req, err := http.NewRequest("GET", e.endpoint+nodeApi+"/localhost/subscription", nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+nodeApi+"/localhost/subscription", nil)
 	if err != nil {
 		return err
 	}
@@ -489,7 +485,7 @@ func (e *Exporter) getNodeSubscriptionMetrics(ch chan<- prometheus.Metric) error
 		log.Printf("DEBUG: Request URL: %s", req.URL)
 	}
 
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -563,7 +559,7 @@ func (e *Exporter) getNodeMetrics(ch chan<- prometheus.Metric) error {
 	// NOTE: According to the api documentation, we have to provide the node name (won't work with the node ip),
 	// but it seems to work with any name, so we just use "localhost" here.
 	// see: https://pbs.proxmox.com/docs/api-viewer/index.html#/nodes/{node}
-	req, err := http.NewRequest("GET", e.endpoint+nodeApi+"/localhost/status", nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+nodeApi+"/localhost/status", nil)
 	if err != nil {
 		return err
 	}
@@ -578,7 +574,7 @@ func (e *Exporter) getNodeMetrics(ch chan<- prometheus.Metric) error {
 	}
 
 	// make request and show output
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -680,7 +676,7 @@ func (e *Exporter) getDatastoreMetric(datastore Datastore, ch chan<- prometheus.
 	)
 
 	// get namespaces of datastore
-	req, err := http.NewRequest("GET", e.endpoint+datastoreApi+"/"+datastore.Store+"/namespace", nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreApi+"/"+datastore.Store+"/namespace", nil)
 	if err != nil {
 		return err
 	}
@@ -695,7 +691,7 @@ func (e *Exporter) getDatastoreMetric(datastore Datastore, ch chan<- prometheus.
 	}
 
 	// make request and show output
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -771,7 +767,7 @@ func (e *Exporter) getNamespaceMetric(datastore string, namespace string, ch cha
 	}
 
 	// get snapshots of datastore
-	req, err := http.NewRequest("GET", e.endpoint+datastoreApi+"/"+datastore+"/snapshots?ns="+namespace, nil)
+	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreApi+"/"+datastore+"/snapshots?ns="+namespace, nil)
 	if err != nil {
 		return err
 	}
@@ -786,7 +782,7 @@ func (e *Exporter) getNamespaceMetric(datastore string, namespace string, ch cha
 	}
 
 	// make request and show output
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -879,21 +875,30 @@ func findLastSnapshotWithBackupID(response SnapshotResponse, backupID string) (i
 	return 0, "", fmt.Errorf("ERROR: No snapshot found with backupID %s", backupID)
 }
 
-func main() {
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("PBS Exporter Version: %s, Commit: %s, Build Time: %s\n", Version, Commit, BuildTime)
-		os.Exit(0)
+// applyEnv applies the environment variables, which overwrite defaults or flags.
+func applyEnv() {
+	if os.Getenv("PBS_CONFIG_FILE") != "" {
+		*configFile = os.Getenv("PBS_CONFIG_FILE")
 	}
-
-	// log build information
-	log.Printf("INFO: Starting PBS Exporter %s, commit %s, built at %s", Version, Commit, BuildTime)
-
-	// if env variable is set, it will overwrite defaults or flags
 	if os.Getenv("PBS_LOGLEVEL") != "" {
 		*loglevel = os.Getenv("PBS_LOGLEVEL")
 	}
+	// with a config file, the connection settings come from the file only and
+	// these flags/environment variables are ignored
+	if *configFile == "" {
+		readConnectionEnv()
+	}
+	if os.Getenv("PBS_METRICS_PATH") != "" {
+		*metricsPath = os.Getenv("PBS_METRICS_PATH")
+	}
+	if os.Getenv("PBS_LISTEN_ADDRESS") != "" {
+		*listenAddress = os.Getenv("PBS_LISTEN_ADDRESS")
+	}
+}
+
+// readConnectionEnv applies the environment variables of the connection
+// settings. They are only used without a config file.
+func readConnectionEnv() {
 	if os.Getenv("PBS_ENDPOINT") != "" {
 		*endpoint = os.Getenv("PBS_ENDPOINT")
 	}
@@ -924,80 +929,94 @@ func main() {
 	if os.Getenv("PBS_INSECURE") != "" {
 		*insecure = os.Getenv("PBS_INSECURE")
 	}
-	if os.Getenv("PBS_METRICS_PATH") != "" {
-		*metricsPath = os.Getenv("PBS_METRICS_PATH")
-	}
-	if os.Getenv("PBS_LISTEN_ADDRESS") != "" {
-		*listenAddress = os.Getenv("PBS_LISTEN_ADDRESS")
+}
+
+func main() {
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("PBS Exporter Version: %s, Commit: %s, Build Time: %s\n", Version, Commit, BuildTime)
+		os.Exit(0)
 	}
 
-	// convert flags
-	insecureBool, err := strconv.ParseBool(*insecure)
-	if err != nil {
-		log.Fatalf("ERROR: Unable to parse insecure: %s", err)
-	}
+	// log build information
+	log.Printf("INFO: Starting PBS Exporter %s, commit %s, built at %s", Version, Commit, BuildTime)
 
-	// set insecure
-	if insecureBool {
-		tr.TLSClientConfig.InsecureSkipVerify = true
-	}
+	// if env variable is set, it will overwrite defaults or flags
+	applyEnv()
 
-	// set timeout
-	timeoutDuration, err := time.ParseDuration(*timeout)
-	if err != nil {
-		log.Fatalf("ERROR: Unable to parse timeout: %s", err)
+	var modules map[string]*Module
+	if *configFile != "" {
+		// modules: named credential sets from the config file
+		cfg, m, err := LoadModules(*configFile)
+		if err != nil {
+			log.Fatalf("ERROR: %s", err)
+		}
+		modules = m
+
+		// debug
+		if *loglevel == "debug" {
+			log.Printf("DEBUG: Using config file: %s", strings.ReplaceAll(strings.ReplaceAll(*configFile, "\n", ""), "\r", ""))
+			for _, name := range moduleNames(modules) {
+				mc := cfg[name]
+				log.Printf("DEBUG: Module %s: user %s, token name %s, endpoint %s, timeout %s, insecure %t",
+					strings.ReplaceAll(strings.ReplaceAll(name, "\n", ""), "\r", ""),
+					mc.User, mc.TokenName, mc.Endpoint, modules[name].client.Timeout, mc.Insecure)
+			}
+		}
+	} else {
+		// convert flags
+		insecureBool, err := strconv.ParseBool(*insecure)
+		if err != nil {
+			log.Fatalf("ERROR: Unable to parse insecure: %s", err)
+		}
+
+		// set timeout
+		timeoutDuration, err := time.ParseDuration(*timeout)
+		if err != nil {
+			log.Fatalf("ERROR: Unable to parse timeout: %s", err)
+		}
+
+		// the flags/environment variables define the "default" module
+		modules, err = BuildModules(nil, &ModuleConfig{
+			User:       *username,
+			TokenName:  *apitokenname,
+			TokenValue: *apitoken,
+			Endpoint:   *endpoint,
+			Insecure:   insecureBool,
+		}, timeoutDuration)
+		if err != nil {
+			log.Fatalf("ERROR: %s", err)
+		}
+
+		// debug
+		if *loglevel == "debug" {
+			log.Printf("DEBUG: Using connection endpoint: %s", *endpoint)
+			log.Printf("DEBUG: Using connection username: %s", *username)
+			log.Printf("DEBUG: Using connection apitokenname: %s", *apitokenname)
+			log.Printf("DEBUG: Using connection timeout: %s", timeoutDuration)
+			log.Printf("DEBUG: Using connection insecure: %t", insecureBool)
+		}
+
+		if *endpoint != "" {
+			log.Printf("INFO: Using fix connection endpoint: %s", *endpoint)
+		}
 	}
-	client.Timeout = timeoutDuration
 
 	// debug
 	if *loglevel == "debug" {
-		log.Printf("DEBUG: Using connection endpoint: %s", *endpoint)
-		log.Printf("DEBUG: Using connection username: %s", *username)
-		log.Printf("DEBUG: Using connection apitoken: %s", *apitoken)
-		log.Printf("DEBUG: Using connection apitokenname: %s", *apitokenname)
-		log.Printf("DEBUG: Using connection timeout: %s", client.Timeout)
-		log.Printf("DEBUG: Using connection insecure: %t", tr.TLSClientConfig.InsecureSkipVerify)
 		log.Printf("DEBUG: Using metrics path: %s", *metricsPath)
 		log.Printf("DEBUG: Using listen address: %s", *listenAddress)
 	}
 
-	if *endpoint != "" {
-		log.Printf("INFO: Using fix connection endpoint: %s", *endpoint)
+	if *configFile != "" {
+		log.Printf("INFO: Modules: %s", strings.ReplaceAll(strings.ReplaceAll(strings.Join(moduleNames(modules), ", "), "\n", ""), "\r", ""))
 	}
 	log.Printf("INFO: Listening on: %s", *listenAddress)
 	log.Printf("INFO: Metrics path: %s", *metricsPath)
 
 	// start http server
-	http.HandleFunc(*metricsPath, func(w http.ResponseWriter, r *http.Request) {
-		target := ""
-
-		// if endpoint was not set as flag or env variable, we try to get it from "target" query parameter
-		if *endpoint != "" {
-			target = *endpoint
-		} else {
-			target = r.URL.Query().Get("target")
-			if target == "" {
-				// if target is not set, we use the default
-				target = "http://localhost:8007"
-			}
-		}
-
-		// debug
-		if *loglevel == "debug" {
-			log.Printf("DEBUG: Using connection endpoint %s", strings.ReplaceAll(strings.ReplaceAll(target, "\n", ""), "\r", ""))
-		}
-
-		exporter := NewExporter(target, *username, *apitoken, *apitokenname)
-
-		// catch if register of exporter fails
-		err := prometheus.Register(exporter)
-		if err != nil {
-			// if register fails, we log the error and return
-			log.Printf("ERROR: %s", err)
-		}
-		promhttp.Handler().ServeHTTP(w, r) // Serve the metrics
-		prometheus.Unregister(exporter)    // Clean up after serving
-	})
+	http.Handle(*metricsPath, newMetricsHandler(modules, *loglevel == "debug", *configFile != ""))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte(`<html>

@@ -6,9 +6,11 @@ COMMIT_REF  ?= $(shell git describe --dirty --always)
 GOOS        ?= $(shell go env GOOS)
 GOARCH      ?= $(shell go env GOARCH)
 LICENSE     ?= GPL-3
-REPO_URL    ?= https://github.com/natrontech/pbs-exporter
+# <owner>/<name> of the GitHub repository from the "origin" remote, so that forks label their own images
+GIT_REPOSITORY ?= $(shell git remote get-url origin 2>/dev/null | sed -nE 's,^(git@github\.com:|(https|ssh)://([^@/]+@)?github\.com/)([^/]+/[^/]+)$$,\4,p' | sed 's,\.git$$,,')
+REPO_URL    ?= $(if $(GIT_REPOSITORY),https://github.com/$(GIT_REPOSITORY))
 MAIL        ?= info@natron.io
-VENDOR      ?= natrontech
+VENDOR      ?= $(firstword $(subst /, ,$(GIT_REPOSITORY)))
 DESCRIPTION ?= Export Proxmox Backup Server metrics for Prometheus
 
 #########
@@ -28,7 +30,7 @@ go-update:
 
 .PHONY: go-build
 go-build:
-	go build -o $(NAME) -trimpath -tags="netgo" -ldflags "-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT_REF) -X main.BuildTime=$(BUILD_DATE)" main.go
+	go build -o $(NAME) -trimpath -tags="netgo" -ldflags "-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT_REF) -X main.BuildTime=$(BUILD_DATE)" .
 	@echo "Go build completed."
 
 #########
@@ -58,7 +60,8 @@ ifeq ($(findstring -local,$(VERSION)),)
 endif
 
 REGISTRY        ?= ghcr.io
-REPO            ?= $(VENDOR)
+# ghcr.io requires lowercase names
+REPO            ?= $(shell echo '$(VENDOR)' | tr '[:upper:]' '[:lower:]')
 KO_REPOSITORY   := $(REGISTRY)/$(REPO)/$(NAME)
 
 REGISTRY_PASSWORD  ?= dummy
@@ -83,9 +86,15 @@ LABELS		    := "--image-label=org.opencontainers.image.created=$(BUILD_DATE),$\
 						org.opencontainers.image.description=$(DESCRIPTION),$\
 						org.opencontainers.image.base.name=cgr.dev/chainguard/static"
 
+# REPO_URL, VENDOR and REPO have no fallback: fail if they could not be detected from the origin remote
+.PHONY: check-repo
+check-repo:
+	@[ -n "$(REPO_URL)" ] && [ -n "$(VENDOR)" ] && [ -n "$(REPO)" ] || { \
+		echo "ERROR: unable to detect the GitHub repository from the origin remote, set REPO_URL, VENDOR and REPO" >&2; exit 1; }
+
 # Local ko build
 .PHONY: ko-build-local
-ko-build-local: ko
+ko-build-local: ko check-repo
 	@echo Building $(NAME) $(KO_TAGS) for $(KO_PLATFORM) >&2
 	@LD_FLAGS=$(LD_FLAGS) KOCACHE=$(KOCACHE) KO_DOCKER_REPO=$(KO_REPOSITORY) \
 		$(KO) build ./ --bare --tags=$(KO_TAGS) $(LABELS) --push=false --local --platform=$(KO_PLATFORM) --sbom=none
@@ -96,7 +105,7 @@ ko-login: ko
 	@$(KO) login $(REGISTRY) --username $(REGISTRY_USERNAME) --password $(REGISTRY_PASSWORD)
 
 .PHONY: ko-publish
-ko-publish: ko-login
+ko-publish: check-repo ko-login
 	@LD_FLAGS=$(LD_FLAGS) KOCACHE=$(KOCACHE) KO_DOCKER_REPO=$(KO_REPOSITORY) \
 		$(KO) build ./ --bare --tags=$(KO_TAGS) $(LABELS) --sbom=none
 

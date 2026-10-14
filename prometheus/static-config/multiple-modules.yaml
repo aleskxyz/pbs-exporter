@@ -1,0 +1,33 @@
+# Use Case: multiple Proxmox Backup Servers, each with its own user/token
+#           (defined as modules in the file given with --pbs.config-file / PBS_CONFIG_FILE)
+#
+# Setup:
+# - exporter instance: pbs-exporter:10019
+# - config file with the modules "site-a" and "site-b" (see README)
+# - PBS of site-a: https://10.10.10.10:8007 (`endpoint` of module site-a)
+# - PBS of site-b: https://10.10.10.11:8007 (`endpoint` of module site-b)
+
+scrape_configs:
+- job_name: 'pbs-exporter'
+  honor_timestamps: true
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  scheme: http
+  # One target per module. A module always scrapes the `endpoint` from the config
+  # file, the exporter ignores the `target` parameter, so the target listed here is
+  # only used as `instance` label: list the module's `endpoint`.
+  static_configs:
+  - targets: ['https://10.10.10.10:8007'] # endpoint of module site-a
+    labels:
+      module: site-a
+  - targets: ['https://10.10.10.11:8007'] # endpoint of module site-b
+    labels:
+      module: site-b
+  relabel_configs:
+    - source_labels: [module]
+      target_label: __param_module
+    - source_labels: [__address__]
+      target_label: instance
+    - target_label: __address__
+      replacement: pbs-exporter:10019 # pbs-exporter address

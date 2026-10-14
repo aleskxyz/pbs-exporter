@@ -26,6 +26,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Update goreportcard
+        # best effort: an unavailable goreportcard.com must not block the release
+        continue-on-error: true
         uses: creekorful/goreportcard-action@1f35ced8cdac2cba28c9a2f2288a16aacfd507f9 # v1.0
       - name: Setup go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -57,6 +59,7 @@ jobs:
   ko-publish:
     outputs:
       digest: ${{ steps.release.outputs.digest }}
+      image: ${{ steps.image.outputs.name }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -76,6 +79,15 @@ jobs:
           cache: false
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Set image name
+        id: image
+        run: |
+          set -euo pipefail
+          # publish to the owner of the repository running the workflow (works in forks),
+          # ghcr.io requires lowercase names
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${owner}/pbs-exporter" >> "$GITHUB_OUTPUT"
       - name: Publish pbs-exporter
         id: release
         uses: ./.github/actions/publish-image
@@ -84,7 +96,7 @@ jobs:
           registry: ghcr.io
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository_owner }}
+          repository: ${{ steps.image.outputs.owner }}
           version: ${{ github.ref_name }}
           sign-image: true
           sbom-name: pbs-exporter
@@ -112,7 +124,7 @@ jobs:
     # MUST be referenced by tag (see https://github.com/slsa-framework/slsa-github-generator/?tab=readme-ov-file#referencing-slsa-builders-and-generators)
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
-      image: ghcr.io/${{ github.repository_owner }}/pbs-exporter
+      image: ${{ needs.ko-publish.outputs.image }}
       digest: ${{ needs.ko-publish.outputs.digest }}
       registry-username: ${{ github.actor }}
     secrets:
@@ -141,38 +153,48 @@ jobs:
 
       - name: Verify provenance of image
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/pbs-exporter
+          IMAGE: ${{ needs.ko-publish.outputs.image }}
           DIGEST: ${{ needs.ko-publish.outputs.digest }}
         run: |
           set -euo pipefail
+          # policy.cue pins the upstream repository, verify against the one running the workflow (works in forks).
+          # The source uri is matched exactly, a regex would treat dots in repository names as wildcards.
+          # The tag format check replaces the one of the policy's regex and keeps the sed replacement safe.
+          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "ERROR: unexpected tag $GITHUB_REF" >&2
+            exit 1
+          fi
+          uri="git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF}"
+          sed -E "s|^( *uri: ).*$|\1\"${uri}\"|" policy.cue > "$RUNNER_TEMP/policy.cue"
+          grep -qxF "      uri: \"${uri}\"" "$RUNNER_TEMP/policy.cue"
           cosign verify-attestation \
             --type slsaprovenance \
             --new-bundle-format=false \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp '^https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+$' \
-            --policy policy.cue \
+            --policy "$RUNNER_TEMP/policy.cue" \
             $IMAGE@$DIGEST
 
       - name: Verify signature of image
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/pbs-exporter
+          IMAGE: ${{ needs.ko-publish.outputs.image }}
           DIGEST: ${{ needs.ko-publish.outputs.digest }}
         run: |
           set -euo pipefail
           cosign verify --new-bundle-format \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp '^https://github.com/natrontech/pbs-exporter/.github/workflows/release.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+(-rc.[0-9]+)?$' \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
             $IMAGE@$DIGEST
 
       - name: Verify sbom of image
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/pbs-exporter
+          IMAGE: ${{ needs.ko-publish.outputs.image }}
           DIGEST: ${{ needs.ko-publish.outputs.digest }}
         run: |
           set -euo pipefail
           cosign verify-attestation --new-bundle-format \
             --type cyclonedx \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp '^https://github.com/natrontech/pbs-exporter/.github/workflows/release.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+(-rc.[0-9]+)?$' \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
             --policy policy-sbom.cue \
             $IMAGE@$DIGEST
