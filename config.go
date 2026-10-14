@@ -32,9 +32,9 @@ type ModuleConfig struct {
 	TokenName string `yaml:"token_name"`
 	// TokenValue is the secret of the API token.
 	TokenValue string `yaml:"token_value"`
-	// Endpoint optionally pins the module to one PBS. When set, the "target"
-	// URL parameter is ignored (like PBS_ENDPOINT) and redirects are not
-	// followed, so the token is only sent to this endpoint.
+	// Endpoint is the PBS the module scrapes (required). The "target" URL
+	// parameter is ignored (like PBS_ENDPOINT) and redirects are not followed,
+	// so callers of the exporter can not send the token to any other server.
 	Endpoint string `yaml:"endpoint"`
 	// Insecure disables TLS certificate verification.
 	Insecure bool `yaml:"insecure"`
@@ -49,9 +49,6 @@ type Module struct {
 	endpoint            string
 	authorizationHeader string
 	client              *http.Client
-	// validateTarget rejects malformed "target" URL parameters. It is set for
-	// config file modules only; the legacy flag/env module keeps accepting any target.
-	validateTarget bool
 }
 
 // Config is the content of the config file: module name -> module settings.
@@ -105,7 +102,9 @@ func ParseConfig(data []byte) (Config, error) {
 		} else if hasControlChar(m.User) || hasControlChar(m.TokenName) || hasControlChar(m.TokenValue) {
 			invalid = append(invalid, fmt.Sprintf("  - %s: user, token_name and token_value must not contain control characters", name))
 		}
-		if m.Endpoint != "" {
+		if m.Endpoint == "" {
+			invalid = append(invalid, fmt.Sprintf("  - %s: endpoint is required", name))
+		} else {
 			endpoint, err := validateBaseURL(m.Endpoint)
 			if err != nil {
 				invalid = append(invalid, fmt.Sprintf("  - %s: endpoint %s", name, err))
@@ -225,11 +224,15 @@ func NewModule(name string, cfg ModuleConfig, defaultTimeout time.Duration) (*Mo
 func BuildModules(cfg Config, fallback *ModuleConfig, defaultTimeout time.Duration) (map[string]*Module, error) {
 	modules := map[string]*Module{}
 	for name, mc := range cfg {
+		// without a pinned endpoint the "target" URL parameter would decide
+		// where the module's token is sent
+		if mc.Endpoint == "" {
+			return nil, fmt.Errorf("module %q: endpoint is required", name)
+		}
 		m, err := NewModule(name, mc, defaultTimeout)
 		if err != nil {
 			return nil, err
 		}
-		m.validateTarget = true
 		// do not follow redirects, so the token is never sent to another host
 		m.client.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

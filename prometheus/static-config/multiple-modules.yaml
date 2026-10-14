@@ -4,8 +4,8 @@
 # Setup:
 # - exporter instance: pbs-exporter:10019
 # - config file with the modules "site-a" and "site-b" (see README)
-# - PBS of site-a: https://10.10.10.10:8007
-# - PBS of site-b: https://10.10.10.11:8007
+# - PBS of site-a: https://10.10.10.10:8007 (`endpoint` of module site-a)
+# - PBS of site-b: https://10.10.10.11:8007 (`endpoint` of module site-b)
 
 scrape_configs:
 - job_name: 'pbs-exporter'
@@ -14,23 +14,20 @@ scrape_configs:
   scrape_timeout: 10s
   metrics_path: /metrics
   scheme: http
+  # One target per module. A module always scrapes the `endpoint` from the config
+  # file, the exporter ignores the `target` parameter, so the target listed here is
+  # only used as `instance` label: list the module's `endpoint`.
   static_configs:
-  - targets: ['https://10.10.10.10:8007'] # Proxmox Backup Server of site-a
+  - targets: ['https://10.10.10.10:8007'] # endpoint of module site-a
     labels:
       module: site-a
-  - targets: ['https://10.10.10.11:8007'] # Proxmox Backup Server of site-b
+  - targets: ['https://10.10.10.11:8007'] # endpoint of module site-b
     labels:
       module: site-b
-  # For a module that pins `endpoint` in the config file, the `target` parameter is
-  # ignored by the exporter. Copying __param_target to `instance` (below) would then
-  # label the pinned server's metrics with whatever target is listed here, so for
-  # pinned modules list the pinned server as target or set `instance` explicitly.
   relabel_configs:
-    - source_labels: [__address__]
-      target_label: __param_target
     - source_labels: [module]
       target_label: __param_module
-    - source_labels: [__param_target]
+    - source_labels: [__address__]
       target_label: instance
     - target_label: __address__
       replacement: pbs-exporter:10019 # pbs-exporter address

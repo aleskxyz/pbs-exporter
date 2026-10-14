@@ -21,10 +21,10 @@ func moduleNames(modules map[string]*Module) []string {
 
 // newMetricsHandler returns the /metrics handler. With a config file
 // (configMode), each request selects a module with the "module" URL parameter
-// (default "default"). Without one, the "module" parameter is ignored, as it
-// was before modules existed, and the "default" module is always used. Unless
-// the module pins an endpoint, the Proxmox Backup Server to scrape is taken
-// from the "target" URL parameter.
+// (default "default") and scrapes the module's endpoint. Without one, the
+// "module" parameter is ignored, as it was before modules existed, the
+// "default" module is always used, and unless pbs.endpoint pins it, the Proxmox
+// Backup Server to scrape is taken from the "target" URL parameter.
 //
 // Every request gets its own registry, so concurrent scrapes of different
 // targets can not see each other's metrics.
@@ -40,22 +40,15 @@ func newMetricsHandler(modules map[string]*Module, debug bool, configMode bool) 
 			return
 		}
 
-		// a module with a fixed endpoint ignores the "target" parameter,
-		// otherwise it is taken from the "target" query parameter
+		// a module with a fixed endpoint (always the case for config file
+		// modules) ignores the "target" parameter, otherwise it is taken from
+		// the "target" query parameter
 		target := module.endpoint
 		if target == "" {
 			target = r.URL.Query().Get("target")
 			if target == "" {
 				// if target is not set, we use the default
 				target = "http://localhost:8007"
-			} else if module.validateTarget {
-				// config file modules only accept a base URL as target
-				t, err := validateBaseURL(target)
-				if err != nil {
-					http.Error(w, "invalid target: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				target = t
 			}
 		}
 

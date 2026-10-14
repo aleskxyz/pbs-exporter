@@ -82,19 +82,19 @@ func TestModulesUseTheirOwnCredentials(t *testing.T) {
 	srvA, authsA := fakePBS(t, "1.1.1")
 	srvB, authsB := fakePBS(t, "2.2.2")
 	h := newMetricsHandler(testModules(t, Config{
-		"site-a": {User: "root@pam", TokenName: "ta", TokenValue: "sa"},
-		"site-b": {User: "mon@pbs", TokenName: "tb", TokenValue: "sb"},
+		"site-a": {User: "root@pam", TokenName: "ta", TokenValue: "sa", Endpoint: srvA.URL},
+		"site-b": {User: "mon@pbs", TokenName: "tb", TokenValue: "sb", Endpoint: srvB.URL},
 	}, nil), false, true)
 
 	for _, tc := range []struct {
-		module, target, version string
-		auths                   func() []string
-		want                    string
+		module, version string
+		auths           func() []string
+		want            string
 	}{
-		{"site-a", srvA.URL, "1.1.1", authsA, "PBSAPIToken=root@pam!ta:sa"},
-		{"site-b", srvB.URL, "2.2.2", authsB, "PBSAPIToken=mon@pbs!tb:sb"},
+		{"site-a", "1.1.1", authsA, "PBSAPIToken=root@pam!ta:sa"},
+		{"site-b", "2.2.2", authsB, "PBSAPIToken=mon@pbs!tb:sb"},
 	} {
-		code, body := scrape(t, h, "module="+tc.module+"&target="+tc.target)
+		code, body := scrape(t, h, "module="+tc.module)
 		if code != http.StatusOK {
 			t.Fatalf("%s: status %d", tc.module, code)
 		}
@@ -117,13 +117,13 @@ func TestModulesUseTheirOwnCredentials(t *testing.T) {
 }
 
 func TestUnknownModule(t *testing.T) {
-	h := newMetricsHandler(testModules(t, Config{"a": {User: "u", TokenName: "n", TokenValue: "v"}}, nil), false, true)
-	code, _ := scrape(t, h, "module=nope&target=http://127.0.0.1:1")
+	h := newMetricsHandler(testModules(t, Config{"a": {User: "u", TokenName: "n", TokenValue: "v", Endpoint: "http://127.0.0.1:1"}}, nil), false, true)
+	code, _ := scrape(t, h, "module=nope")
 	if code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", code)
 	}
 	// no "default" module when the config file defines none and there is no legacy fallback
-	if code, _ := scrape(t, h, "target=http://127.0.0.1:1"); code != http.StatusBadRequest {
+	if code, _ := scrape(t, h, ""); code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", code)
 	}
 }
@@ -145,7 +145,7 @@ func TestLegacyDefaultModule(t *testing.T) {
 // no "default" module unless defined, 5s timeout, TLS verification on.
 func TestConfigModuleDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pbs.yaml")
-	if err := os.WriteFile(path, []byte("site:\n  user: file@pbs\n  token_name: n\n  token_value: v\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("site:\n  user: file@pbs\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007/\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -160,7 +160,7 @@ func TestConfigModuleDefaults(t *testing.T) {
 		t.Error("no default module must be built when the config file defines none")
 	}
 	m := modules["site"]
-	if m.authorizationHeader != "PBSAPIToken=file@pbs!n:v" || m.endpoint != "" || !m.validateTarget {
+	if m.authorizationHeader != "PBSAPIToken=file@pbs!n:v" || m.endpoint != "https://pbs:8007" {
 		t.Errorf("unexpected module: %+v", m)
 	}
 	if m.client.Timeout != defaultModuleTimeout {
@@ -171,26 +171,25 @@ func TestConfigModuleDefaults(t *testing.T) {
 	}
 }
 
-// A config file module only accepts a base URL as target; the legacy module
-// keeps accepting anything, as before.
-func TestTargetValidation(t *testing.T) {
-	srv, _ := fakePBS(t, "4.4.4")
-	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v"}}, nil), false, true)
-	for _, target := range []string{
-		"ftp://127.0.0.1:1",
-		"127.0.0.1:8007",
-		"http://u:p@127.0.0.1:1",
-		"http://127.0.0.1:1/api2",
-		"http://127.0.0.1:1?x=1",
-		"http://127.0.0.1:1%0aINFO:%20forged",
-	} {
-		if code, _ := scrape(t, file, "module=site&target="+target); code != http.StatusBadRequest {
-			t.Errorf("target %q: status = %d, want 400", target, code)
+// A config file module must pin an endpoint, so the "target" parameter can
+// never decide where its token is sent; the legacy module keeps accepting any
+// target, as before.
+func TestConfigModulesRequireEndpoint(t *testing.T) {
+	if _, err := BuildModules(Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v"}}, nil, time.Second); err == nil {
+		t.Error("expected an error for a config file module without endpoint")
+	}
+
+	pinned, _ := fakePBS(t, "4.4.4")
+	other, otherAuths := fakePBS(t, "8.8.8")
+	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "SECRET", Endpoint: pinned.URL}}, nil), false, true)
+	for _, target := range []string{other.URL, "ftp://127.0.0.1:1", "http://127.0.0.1:1%0aINFO:%20forged"} {
+		code, body := scrape(t, file, "module=site&target="+target)
+		if code != http.StatusOK || !strings.Contains(body, `version="4.4.4"`) {
+			t.Errorf("target %q: status %d, want the pinned endpoint to be scraped, body:\n%s", target, code, body)
 		}
 	}
-	// a trailing slash is accepted and trimmed
-	if code, body := scrape(t, file, "module=site&target="+srv.URL+"/"); code != http.StatusOK || !strings.Contains(body, "\npbs_up 1\n") {
-		t.Errorf("trailing slash: status %d body:\n%s", code, body)
+	if got := otherAuths(); len(got) != 0 {
+		t.Errorf("token was sent to the target parameter: %v", got)
 	}
 
 	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v"}), false, false)
@@ -224,12 +223,12 @@ func TestScrapeCancelStopsUpstream(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	t.Cleanup(srv.Close)
-	h := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Timeout: "1m"}}, nil), false, true)
+	h := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL, Timeout: "1m"}}, nil), false, true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, body := scrapeRequest(t, h, httptest.NewRequest("GET", "/metrics?module=site&target="+srv.URL, nil).WithContext(ctx))
+	_, body := scrapeRequest(t, h, httptest.NewRequest("GET", "/metrics?module=site", nil).WithContext(ctx))
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("scrape took %s after the request was cancelled", d)
 	}
@@ -253,25 +252,25 @@ func TestModuleEndpointIsPinned(t *testing.T) {
 	}
 }
 
-// Concurrent scrapes of different targets must not mix up their metrics.
+// Concurrent scrapes of different modules must not mix up their metrics.
 func TestConcurrentScrapes(t *testing.T) {
 	srvA, _ := fakePBS(t, "1.1.1")
 	srvB, _ := fakePBS(t, "2.2.2")
 	h := newMetricsHandler(testModules(t, Config{
-		"a": {User: "u@pbs", TokenName: "n", TokenValue: "a"},
-		"b": {User: "u@pbs", TokenName: "n", TokenValue: "b"},
+		"a": {User: "u@pbs", TokenName: "n", TokenValue: "a", Endpoint: srvA.URL},
+		"b": {User: "u@pbs", TokenName: "n", TokenValue: "b", Endpoint: srvB.URL},
 	}, nil), false, true)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
-		for _, tc := range []struct{ module, target, version, other string }{
-			{"a", srvA.URL, "1.1.1", "2.2.2"},
-			{"b", srvB.URL, "2.2.2", "1.1.1"},
+		for _, tc := range []struct{ module, version, other string }{
+			{"a", "1.1.1", "2.2.2"},
+			{"b", "2.2.2", "1.1.1"},
 		} {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				code, body := scrape(t, h, "module="+tc.module+"&target="+tc.target)
+				code, body := scrape(t, h, "module="+tc.module)
 				if code != http.StatusOK {
 					t.Errorf("module %s: status %d", tc.module, code)
 				}
@@ -290,35 +289,40 @@ default:
   user: root@pam
   token_name: t
   token_value: v
+  endpoint: https://pbs:8007
   insecure: true
   timeout: 10s
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := cfg["default"]; m.User != "root@pam" || !m.Insecure || m.Timeout != "10s" {
+	if m := cfg["default"]; m.User != "root@pam" || m.Endpoint != "https://pbs:8007" || !m.Insecure || m.Timeout != "10s" {
 		t.Errorf("unexpected module: %+v", m)
 	}
 
+	// a valid module body, so that each case below is invalid for one reason only
+	const body = "  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n"
+	const mod = "a:\n" + body
 	for name, in := range map[string]string{
-		"empty":         ``,
-		"not a map":     `- a`,
-		"missing token": "a:\n  user: u\n  token_name: n\n",
-		"unknown key":   "a:\n  user: u\n  token_name: n\n  token_value: v\n  verify_ssl: false\n",
-		"two documents": "a:\n  user: u\n  token_name: n\n  token_value: v\n---\nb:\n  user: u\n",
-		"empty name":    "\"\":\n  user: u\n  token_name: n\n  token_value: v\n",
-		"duplicate":     "a:\n  user: u\n  token_name: n\n  token_value: v\na:\n  user: x\n  token_name: n\n  token_value: v\n",
-		"zero timeout":  "a:\n  user: u\n  token_name: n\n  token_value: v\n  timeout: 0s\n",
-		"neg timeout":   "a:\n  user: u\n  token_name: n\n  token_value: v\n  timeout: -1s\n",
-		"bad timeout":   "a:\n  user: u\n  token_name: n\n  token_value: v\n  timeout: soon\n",
-		"bad endpoint":  "a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007/api2\n",
-		"second doc":    "a:\n  user: u\n  token_name: n\n  token_value: v\n---\n~\n---\nb: 1\n",
-		"null key":      "~:\n  user: u\n  token_name: n\n  token_value: v\nb:\n  user: u\n  token_name: n\n  token_value: v\n",
-		"null word key": "null:\n  user: u\n  token_name: n\n  token_value: v\n",
-		"block token":   "a:\n  user: u\n  token_name: n\n  token_value: |\n    v\n",
-		"tab user":      "a:\n  user: \"u\\tx\"\n  token_name: n\n  token_value: v\n",
-		"cr name":       "a:\n  user: u\n  token_name: \"n\\r\"\n  token_value: v\n",
-		"del token":     "a:\n  user: u\n  token_name: n\n  token_value: \"v\\x7f\"\n",
+		"empty":            ``,
+		"not a map":        `- a`,
+		"missing token":    "a:\n  user: u\n  token_name: n\n  endpoint: https://pbs:8007\n",
+		"missing endpoint": "a:\n  user: u\n  token_name: n\n  token_value: v\n",
+		"unknown key":      mod + "  verify_ssl: false\n",
+		"two documents":    mod + "---\nb:\n  user: u\n",
+		"empty name":       "\"\":\n" + body,
+		"duplicate":        mod + mod,
+		"zero timeout":     mod + "  timeout: 0s\n",
+		"neg timeout":      mod + "  timeout: -1s\n",
+		"bad timeout":      mod + "  timeout: soon\n",
+		"bad endpoint":     "a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007/api2\n",
+		"second doc":       mod + "---\n~\n---\nb: 1\n",
+		"null key":         "~:\n" + body + "b:\n" + body,
+		"null word key":    "null:\n" + body,
+		"block token":      "a:\n  user: u\n  token_name: n\n  endpoint: https://pbs:8007\n  token_value: |\n    v\n",
+		"tab user":         "a:\n  user: \"u\\tx\"\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
+		"cr name":          "a:\n  user: u\n  token_name: \"n\\r\"\n  token_value: v\n  endpoint: https://pbs:8007\n",
+		"del token":        "a:\n  user: u\n  token_name: n\n  token_value: \"v\\x7f\"\n  endpoint: https://pbs:8007\n",
 	} {
 		if _, err := ParseConfig([]byte(in)); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -333,8 +337,8 @@ default:
 
 	// an empty trailing document is fine
 	for _, in := range []string{
-		"a:\n  user: u\n  token_name: n\n  token_value: v\n---\n",
-		"---\na:\n  user: u\n  token_name: n\n  token_value: v\n---\n...\n",
+		mod + "---\n",
+		"---\n" + mod + "---\n...\n",
 	} {
 		if _, err := ParseConfig([]byte(in)); err != nil {
 			t.Errorf("%q: %v", in, err)

@@ -959,12 +959,8 @@ func main() {
 			log.Printf("DEBUG: Using config file: %s", *configFile)
 			for _, name := range moduleNames(modules) {
 				mc := cfg[name]
-				moduleEndpoint := mc.Endpoint
-				if moduleEndpoint == "" {
-					moduleEndpoint = "from target parameter"
-				}
 				log.Printf("DEBUG: Module %s: user %s, token name %s, endpoint %s, timeout %s, insecure %t",
-					name, mc.User, mc.TokenName, moduleEndpoint, modules[name].client.Timeout, mc.Insecure)
+					name, mc.User, mc.TokenName, mc.Endpoint, modules[name].client.Timeout, mc.Insecure)
 			}
 		}
 	} else {
