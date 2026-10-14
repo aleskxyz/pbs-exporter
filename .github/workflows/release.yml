@@ -157,9 +157,16 @@ jobs:
           DIGEST: ${{ needs.ko-publish.outputs.digest }}
         run: |
           set -euo pipefail
-          # policy.cue pins the upstream repository, verify against the one running the workflow (works in forks)
-          sed "s|github.com/natrontech/pbs-exporter@|github.com/${GITHUB_REPOSITORY}@|" policy.cue > "$RUNNER_TEMP/policy.cue"
-          grep -qF "github.com/${GITHUB_REPOSITORY}@" "$RUNNER_TEMP/policy.cue"
+          # policy.cue pins the upstream repository, verify against the one running the workflow (works in forks).
+          # The source uri is matched exactly, a regex would treat dots in repository names as wildcards.
+          # The tag format check replaces the one of the policy's regex and keeps the sed replacement safe.
+          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "ERROR: unexpected tag $GITHUB_REF" >&2
+            exit 1
+          fi
+          uri="git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_REF}"
+          sed -E "s|^( *uri: ).*$|\1\"${uri}\"|" policy.cue > "$RUNNER_TEMP/policy.cue"
+          grep -qxF "      uri: \"${uri}\"" "$RUNNER_TEMP/policy.cue"
           cosign verify-attestation \
             --type slsaprovenance \
             --new-bundle-format=false \
@@ -176,7 +183,7 @@ jobs:
           set -euo pipefail
           cosign verify --new-bundle-format \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+(-rc.[0-9]+)?$" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
             $IMAGE@$DIGEST
 
       - name: Verify sbom of image
@@ -188,6 +195,6 @@ jobs:
           cosign verify-attestation --new-bundle-format \
             --type cyclonedx \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v[0-9]+.[0-9]+.[0-9]+(-rc.[0-9]+)?$" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
             --policy policy-sbom.cue \
             $IMAGE@$DIGEST
