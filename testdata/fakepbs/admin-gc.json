@@ -1,0 +1,11 @@
+{
+  "data": [
+    {
+      "store": "store1", "schedule": "daily", "last-run-state": "OK", "last-run-endtime": 1700001000,
+      "next-run": 1700604800, "duration": 1000,
+      "upid": "UPID:pbs:00000001:00000002:00000004:6553F100:garbage_collection:store1:root@pam:",
+      "disk-bytes": 1000000, "index-data-bytes": 5000000, "pending-bytes": 100, "removed-bytes": 2000,
+      "removed-bad": 0, "still-bad": 0
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "data": [
+    {
+      "id": "v-1", "store": "store1", "ns": "", "outdated-after": 30, "ignore-verified": true, "schedule": "sat 02:00",
+      "last-run-state": "OK", "last-run-endtime": 1700003600, "next-run": 1700604800,
+      "last-run-upid": "UPID:pbs:00000001:00000002:00000003:6553F100:verificationjob:store1\\x3av\\x2d1:root@pam:"
+    },
+    {"id": "v-2", "store": "store1", "ns": "site-a", "schedule": "daily", "next-run": 1700100000}
+  ]
+}

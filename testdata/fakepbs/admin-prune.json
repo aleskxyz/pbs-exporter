@@ -1,0 +1,9 @@
+{
+  "data": [
+    {
+      "id": "p-1", "store": "store1", "ns": "site-a", "keep-last": 3, "keep-daily": 7, "schedule": "daily",
+      "last-run-state": "datastore is locked", "last-run-endtime": 1700000060, "next-run": 1700086400,
+      "last-run-upid": "UPID:pbs:00000001:00000002:00000005:6553F100:prunejob:store1:root@pam:"
+    }
+  ]
+}

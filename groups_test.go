@@ -63,7 +63,10 @@ func TestGroupMetricsWithoutSnapshots(t *testing.T) {
 # TYPE pbs_collector_success gauge
 pbs_collector_success{collector="datastores"} 1
 pbs_collector_success{collector="groups"} 0
+pbs_collector_success{collector="jobs"} 1
 pbs_collector_success{collector="node"} 1
+pbs_collector_success{collector="sync"} 1
+pbs_collector_success{collector="tasks"} 1
 pbs_collector_success{collector="version"} 1
 `, "pbs_collector_success")
 }

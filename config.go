@@ -27,6 +27,13 @@ const defaultModuleTimeout = 5 * time.Second
 // module that sets none.
 const defaultMaxConcurrency = 4
 
+// defaultTaskLookback is how far back the task log is read by default; long
+// enough to see the last run of a weekly job.
+const defaultTaskLookback = 8 * 24 * time.Hour
+
+// defaultTaskLimit is the default maximum number of tasks read from the task log.
+const defaultTaskLimit = 10000
+
 // ModuleConfig holds the credentials and connection settings used to talk to a
 // Proxmox Backup Server. A module is selected per scrape with the "module" URL
 // parameter, the same way prometheus-pve-exporter does it.
@@ -51,6 +58,12 @@ type ModuleConfig struct {
 	// Collectors enables (true) or disables (false) collectors; collectors
 	// that are not listed keep their default.
 	Collectors map[string]bool `yaml:"collectors"`
+	// TaskLookback is how far back the task log is read (Go duration),
+	// defaults to defaultTaskLookback.
+	TaskLookback string `yaml:"task_lookback"`
+	// TaskLimit is the maximum number of tasks read from the task log,
+	// defaults to defaultTaskLimit.
+	TaskLimit int `yaml:"task_limit"`
 }
 
 // Module is a validated ModuleConfig with a dedicated HTTP client, so that
@@ -63,8 +76,10 @@ type Module struct {
 	maxConcurrency      int
 	// sem limits the concurrent requests of all scrapes of a module with a
 	// fixed endpoint; see NewExporter for modules without one.
-	sem        *semaphore.Weighted
-	collectors []*collector
+	sem          *semaphore.Weighted
+	collectors   []*collector
+	taskLookback time.Duration
+	taskLimit    int
 }
 
 // Config is the content of the config file: module name -> module settings.
@@ -148,6 +163,16 @@ func ParseConfig(data []byte) (Config, error) {
 		}
 		if err := validateCollectors(m.Collectors); err != nil {
 			invalid = append(invalid, fmt.Sprintf("  - %s: collectors: %s", name, err))
+		}
+		if m.TaskLookback != "" {
+			if d, err := time.ParseDuration(m.TaskLookback); err != nil {
+				invalid = append(invalid, fmt.Sprintf("  - %s: unable to parse task_lookback: %s", name, err))
+			} else if d <= 0 {
+				invalid = append(invalid, fmt.Sprintf("  - %s: task_lookback must be greater than 0", name))
+			}
+		}
+		if m.TaskLimit < 0 {
+			invalid = append(invalid, fmt.Sprintf("  - %s: task_limit must be greater than 0", name))
 		}
 		cfg[name] = m
 	}
@@ -243,6 +268,23 @@ func NewModule(name string, cfg ModuleConfig, defaultTimeout time.Duration) (*Mo
 	if err := validateCollectors(cfg.Collectors); err != nil {
 		return nil, fmt.Errorf("module %q: collectors: %w", name, err)
 	}
+	taskLookback := defaultTaskLookback
+	if cfg.TaskLookback != "" {
+		d, err := time.ParseDuration(cfg.TaskLookback)
+		if err != nil {
+			return nil, fmt.Errorf("module %q: unable to parse task_lookback: %w", name, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("module %q: task_lookback must be greater than 0", name)
+		}
+		taskLookback = d
+	}
+	taskLimit := defaultTaskLimit
+	if cfg.TaskLimit < 0 {
+		return nil, fmt.Errorf("module %q: task_limit must be greater than 0", name)
+	} else if cfg.TaskLimit > 0 {
+		taskLimit = cfg.TaskLimit
+	}
 	// the default transport brings dial, TLS handshake and idle timeouts
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	// no proxy from the environment, as before
@@ -263,6 +305,8 @@ func NewModule(name string, cfg ModuleConfig, defaultTimeout time.Duration) (*Mo
 		maxConcurrency:      maxConcurrency,
 		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
 		collectors:          enabledCollectors(cfg.Collectors),
+		taskLookback:        taskLookback,
+		taskLimit:           taskLimit,
 	}, nil
 }
 

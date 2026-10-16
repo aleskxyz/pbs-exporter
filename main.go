@@ -36,6 +36,10 @@ var (
 		"Maximum number of concurrent requests to the Proxmox Backup Server")
 	collectorList = flag.String("pbs.collectors", "",
 		"Collectors to enable (name) or disable (-name), comma separated, e.g. \"access,-apt\"")
+	taskLookback = flag.String("pbs.task-lookback", defaultTaskLookback.String(),
+		"How far back the task log of the Proxmox Backup Server is read")
+	taskLimit = flag.String("pbs.task-limit", strconv.Itoa(defaultTaskLimit),
+		"Maximum number of tasks read from the task log of the Proxmox Backup Server")
 	metricsPath = flag.String("pbs.metrics-path", "/metrics",
 		"Path under which to expose metrics")
 	listenAddress = flag.String("pbs.listen-address", ":10019",
@@ -136,6 +140,12 @@ func readConnectionEnv() {
 	if os.Getenv("PBS_COLLECTORS") != "" {
 		*collectorList = os.Getenv("PBS_COLLECTORS")
 	}
+	if os.Getenv("PBS_TASK_LOOKBACK") != "" {
+		*taskLookback = os.Getenv("PBS_TASK_LOOKBACK")
+	}
+	if os.Getenv("PBS_TASK_LIMIT") != "" {
+		*taskLimit = os.Getenv("PBS_TASK_LIMIT")
+	}
 }
 
 // parseScrapeTimeouts parses the scrape timeout flags.
@@ -172,6 +182,10 @@ func legacyModule() (map[string]*Module, error) {
 	if err != nil || concurrency <= 0 {
 		return nil, fmt.Errorf("max concurrency must be a number greater than 0")
 	}
+	limit, err := strconv.Atoi(*taskLimit)
+	if err != nil || limit <= 0 {
+		return nil, fmt.Errorf("task limit must be a number greater than 0")
+	}
 	collectors, err := parseCollectorList(*collectorList)
 	if err != nil {
 		return nil, fmt.Errorf("collectors: %w", err)
@@ -189,6 +203,8 @@ func legacyModule() (map[string]*Module, error) {
 		Insecure:       insecureBool,
 		MaxConcurrency: concurrency,
 		Collectors:     collectors,
+		TaskLookback:   *taskLookback,
+		TaskLimit:      limit,
 	}, timeoutDuration)
 }
 

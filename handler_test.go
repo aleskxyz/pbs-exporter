@@ -335,7 +335,7 @@ func TestLoadConfigRejectsControlCharsInPath(t *testing.T) {
 // saveFlags restores the flag values applyEnv may change after the test.
 func saveFlags(t *testing.T) {
 	t.Helper()
-	ptrs := []*string{configFile, loglevel, endpoint, username, apitokenname, apitoken, timeout, insecure, maxConcurrency, collectorList, metricsPath, listenAddress, scrapeTimeout, scrapeTimeoutOffset}
+	ptrs := []*string{configFile, loglevel, endpoint, username, apitokenname, apitoken, timeout, insecure, maxConcurrency, collectorList, taskLookback, taskLimit, metricsPath, listenAddress, scrapeTimeout, scrapeTimeoutOffset}
 	saved := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		saved[i] = *p

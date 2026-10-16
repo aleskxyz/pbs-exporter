@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"upid": "UPID:pbs:00000001:00000002:00000013:65561428:syncjob:pbs\\x2dc\\x3aother\\x3astore1\\x3a\\x3as\\x2d2:root@pam:", "worker_type": "syncjob", "worker_id": "pbs-c:other:store1::s-2", "user": "root@pam", "starttime": 1700140072},
+    {"upid": "UPID:pbs:00000001:00000002:00000015:65561500:backup:store1\\x3avm\\x2f100:pve@pbs!backup:", "worker_type": "backup", "worker_id": "store1:vm/100", "user": "pve@pbs!backup", "starttime": 1700140288},
+    {"upid": "UPID:pbs:00000001:00000002:00000016:65561500:backup:store1\\x3act\\x2f100:pve@pbs!backup:", "worker_type": "backup", "worker_id": "store1:ct/100", "user": "pve@pbs!backup", "starttime": 1700140288}
+  ]
+}

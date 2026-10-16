@@ -1,0 +1,11 @@
+{
+  "data": [
+    {
+      "id": "s-1", "store": "store1", "ns": "site-a", "remote": "pbs-b", "remote-store": "main", "remote-ns": "site-a",
+      "remove-vanished": true, "transfer-last": 2, "group-filter": ["type:vm", "regex:^1"], "schedule": "hourly",
+      "sync-direction": "pull", "owner": "sync@pbs",
+      "last-run-state": "OK", "last-run-endtime": 1700000300, "next-run": 1700003600,
+      "last-run-upid": "UPID:pbs:00000001:00000002:00000006:6553F100:syncjob:pbs\\x2db\\x3amain\\x3astore1\\x3asite\\x2da\\x3as\\x2d1:root@pam:"
+    }
+  ]
+}

@@ -45,6 +45,9 @@ func allCollectors() []*collector {
 		datastoresCollector,
 		snapshotsCollector,
 		groupsCollector,
+		jobsCollector,
+		syncCollector,
+		tasksCollector,
 	}
 }
 
@@ -166,12 +169,16 @@ func forEach[T any](items []T, limit int, f func(T) error) error {
 // that more than one collector uses, so that each is fetched only once.
 type scrapeState struct {
 	api            *apiClient
+	module         *Module
 	maxConcurrency int
+	// now is when the scrape started
+	now time.Time
 
 	datastoreUsage memo[struct{}, []datastoreUsage]
 	datastoreList  memo[struct{}, []datastoreListItem]
 	namespaces     memo[string, []namespaceItem]
 	snapshots      memo[storeNamespace, []snapshotItem]
+	tasks          memo[struct{}, []taskItem]
 }
 
 type storeNamespace struct {
@@ -235,9 +242,15 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- info
 	ch <- collectorSuccess
 	ch <- collectorDuration
+	// collectors may share descriptors (e.g. the job metrics of jobs and
+	// sync), the registry refuses duplicates
+	seen := map[*prometheus.Desc]bool{}
 	for _, c := range e.module.collectors {
 		for _, d := range c.descs {
-			ch <- d
+			if !seen[d] {
+				seen[d] = true
+				ch <- d
+			}
 		}
 	}
 }
@@ -246,7 +259,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(e.ctx, e.timeout)
 	defer cancel()
 
-	s := &scrapeState{api: e.api, maxConcurrency: e.module.maxConcurrency}
+	s := &scrapeState{api: e.api, module: e.module, maxConcurrency: e.module.maxConcurrency, now: time.Now()}
 	collectors := e.module.collectors
 	errs := make([]error, len(collectors))
 	durations := make([]time.Duration, len(collectors))

@@ -23,16 +23,24 @@ type fakeResp struct {
 // defaultRoutes maps the API paths to the fixtures in testdata/fakepbs. A key
 // with "?" only matches that query.
 var defaultRoutes = map[string]string{
-	"/api2/json/version":                                    "version.json",
-	"/api2/json/status/datastore-usage":                     "datastore-usage.json",
-	"/api2/json/admin/datastore":                            "admin-datastore.json",
-	"/api2/json/admin/datastore/store1/namespace":           "namespace.json",
-	"/api2/json/admin/datastore/store1/snapshots?ns=":       "snapshots-root.json",
-	"/api2/json/admin/datastore/store1/snapshots?ns=site-a": "snapshots-site-a.json",
-	"/api2/json/admin/datastore/store1/groups?ns=":          "groups-root.json",
-	"/api2/json/admin/datastore/store1/groups?ns=site-a":    "groups-site-a.json",
-	"/api2/json/nodes/localhost/status":                     "node-status.json",
-	"/api2/json/nodes/localhost/subscription":               "subscription.json",
+	"/api2/json/version":                                     "version.json",
+	"/api2/json/status/datastore-usage":                      "datastore-usage.json",
+	"/api2/json/admin/datastore":                             "admin-datastore.json",
+	"/api2/json/admin/datastore/store1/namespace":            "namespace.json",
+	"/api2/json/admin/datastore/store1/snapshots?ns=":        "snapshots-root.json",
+	"/api2/json/admin/datastore/store1/snapshots?ns=site-a":  "snapshots-site-a.json",
+	"/api2/json/admin/datastore/store1/groups?ns=":           "groups-root.json",
+	"/api2/json/admin/datastore/store1/groups?ns=site-a":     "groups-site-a.json",
+	"/api2/json/nodes/localhost/status":                      "node-status.json",
+	"/api2/json/nodes/localhost/subscription":                "subscription.json",
+	"/api2/json/admin/verify":                                "admin-verify.json",
+	"/api2/json/admin/prune":                                 "admin-prune.json",
+	"/api2/json/admin/gc":                                    "admin-gc.json",
+	"/api2/json/admin/sync?sync-direction=all":               "admin-sync.json",
+	"/api2/json/config/remote":                               "config-remote.json",
+	"/api2/json/access/permissions":                          "access-permissions.json",
+	"/api2/json/nodes/localhost/tasks":                       "tasks.json",
+	"/api2/json/nodes/localhost/tasks?limit=10000&running=1": "tasks-running.json",
 }
 
 // fakeServer is a fake PBS that answers from defaultRoutes and per-test
