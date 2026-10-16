@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/common/expfmt"
 )
 
 // Groups are told apart by type and ID (vm/100 and ct/100 are two groups), a
@@ -67,5 +73,76 @@ func TestNamespaceRoot(t *testing.T) {
 		if got := namespaceRoot(in); got != want {
 			t.Errorf("%q: got %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A running backup is listed without manifest (no size, notes or
+// verification); the newest finished snapshot is reported until it ends.
+func TestGroupIgnoresRunningBackup(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/snapshots?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"200","backup-time":1700000000,"comment":"app","size":4096,"verification":{"state":"ok"}},
+			{"backup-type":"vm","backup-id":"200","backup-time":1700090000},
+			{"backup-type":"vm","backup-id":"201","backup-time":1700090000}]}`},
+		"/api2/json/admin/datastore/store1/groups?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"200","backup-count":2,"last-backup":1700000000,"owner":"site-a@pbs"},
+			{"backup-type":"vm","backup-id":"201","backup-count":1,"last-backup":0,"owner":"site-a@pbs"}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false}})
+	got := seriesOf(t, e, "pbs_group_last_backup_verify_state", "pbs_group_info")
+	for _, want := range []string{
+		`pbs_group_last_backup_verify_state{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a",state="ok"} 1`,
+		`pbs_group_info{backup_id="200",backup_type="vm",comment="app",datastore="store1",namespace_root="site-a",owner="site-a@pbs",pbs_namespace="site-a"} 1`,
+		// only a running first backup: no verification state yet
+		`pbs_group_info{backup_id="201",backup_type="vm",comment="",datastore="store1",namespace_root="site-a",owner="site-a@pbs",pbs_namespace="site-a"} 1`,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, s := range got {
+		if strings.Contains(s, `backup_id="201"`) && strings.HasPrefix(s, "pbs_group_last_backup_verify_state") {
+			t.Errorf("verification state for a group with only a running backup: %s", s)
+		}
+	}
+}
+
+// seriesOf returns the series of the given metrics of one scrape of c, one
+// per line in the text format.
+func seriesOf(t *testing.T, c prometheus.Collector, names ...string) []string {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(c)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	for _, f := range families {
+		if slices.Contains(names, f.GetName()) {
+			if _, err := expfmt.MetricFamilyToText(&buf, f); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var out []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// A group listed twice must not fail the scrape with duplicate series.
+func TestDuplicateGroupIsSkipped(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/groups?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"},
+			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"}]}`},
+	})
+	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{})}, true, testTimeouts)
+	if code, body := scrape(t, h, "module=site"); code != http.StatusOK || !strings.Contains(body, `pbs_collector_success{collector="groups"} 1`) {
+		t.Errorf("status %d:\n%s", code, body)
 	}
 }

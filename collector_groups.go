@@ -44,22 +44,29 @@ type groupKey struct {
 
 // groupSummary is what the snapshot list says about one backup group.
 type groupSummary struct {
-	newest snapshotItem
+	// newest is the newest finished snapshot, nil if there is none.
+	newest *snapshotItem
+}
+
+// finished reports whether a snapshot has a manifest; PBS lists running
+// backups without one, and without notes, verification and size.
+func (s snapshotItem) finished() bool {
+	return s.Size != nil
 }
 
 // summarizeSnapshots goes once over the snapshot list of a namespace and
 // returns the summary of every backup group in it.
 func summarizeSnapshots(snapshots []snapshotItem) map[groupKey]*groupSummary {
 	groups := map[groupKey]*groupSummary{}
-	for _, snap := range snapshots {
+	for i, snap := range snapshots {
 		key := groupKey{snap.BackupType, snap.BackupID}
 		g, ok := groups[key]
 		if !ok {
-			groups[key] = &groupSummary{newest: snap}
-			continue
+			g = &groupSummary{}
+			groups[key] = g
 		}
-		if snap.BackupTime > g.newest.BackupTime {
-			g.newest = snap
+		if snap.finished() && (g.newest == nil || snap.BackupTime > g.newest.BackupTime) {
+			g.newest = &snapshots[i]
 		}
 	}
 	return groups
@@ -107,12 +114,19 @@ var groupsCollector = &collector{
 
 func collectGroupMetrics(store, ns string, groups []groupItem, summaries map[groupKey]*groupSummary, ch chan<- prometheus.Metric) {
 	root := namespaceRoot(ns)
+	seen := map[groupKey]bool{}
 	for _, g := range groups {
+		key := groupKey{g.BackupType, g.BackupID}
+		// a group listed twice would make the whole scrape fail
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		labels := []string{store, ns, root, g.BackupType, g.BackupID}
 		gauge := func(d *prometheus.Desc, v float64, extra ...string) {
 			ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, append(labels, extra...)...)
 		}
-		summary := summaries[groupKey{g.BackupType, g.BackupID}]
+		summary := summaries[key]
 
 		gauge(groupSnapshots, float64(g.BackupCount))
 		// no series for a group without snapshots: 0 would read as 1970
@@ -120,8 +134,8 @@ func collectGroupMetrics(store, ns string, groups []groupItem, summaries map[gro
 			gauge(groupLastBackupTimestamp, float64(g.LastBackup))
 		}
 		comment := g.Comment
-		if summary != nil {
-			gauge(groupLastBackupVerifyState, 1, verifyState(summary.newest))
+		if summary != nil && summary.newest != nil {
+			gauge(groupLastBackupVerifyState, 1, verifyState(*summary.newest))
 			if comment == "" {
 				comment = summary.newest.Comment
 			}

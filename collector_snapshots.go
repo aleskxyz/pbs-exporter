@@ -22,10 +22,13 @@ type namespaceItem struct {
 
 // snapshotItem is an entry of /admin/datastore/{store}/snapshots.
 type snapshotItem struct {
-	BackupType   string `json:"backup-type"`
-	BackupID     string `json:"backup-id"`
-	BackupTime   int64  `json:"backup-time"`
-	Comment      string `json:"comment"`
+	BackupType string `json:"backup-type"`
+	BackupID   string `json:"backup-id"`
+	BackupTime int64  `json:"backup-time"`
+	Comment    string `json:"comment"`
+	// Size is not set while the snapshot has no manifest: the backup is
+	// still running (or the manifest is not readable).
+	Size         *int64 `json:"size"`
 	Verification struct {
 		State string `json:"state"`
 	} `json:"verification"`
