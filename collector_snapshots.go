@@ -30,8 +30,12 @@ type snapshotItem struct {
 	// still running (or the manifest is not readable).
 	Size      *int64 `json:"size"`
 	Protected bool   `json:"protected"`
-	// Fingerprint of the encryption key, only set for encrypted snapshots.
-	Fingerprint  string `json:"fingerprint"`
+	// Files are the archives of the snapshot with their crypt mode ("none",
+	// "encrypt", "sign-only"); not set while the backup runs.
+	Files []struct {
+		Filename  string `json:"filename"`
+		CryptMode string `json:"crypt-mode"`
+	} `json:"files"`
 	Verification struct {
 		State string `json:"state"`
 		UPID  string `json:"upid"`

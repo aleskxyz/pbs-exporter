@@ -112,7 +112,7 @@ pbs_group_snapshots_by_verify_state{backup_id="200",backup_type="vm",datastore="
 pbs_group_last_verify_timestamp_seconds{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 1700000256
 pbs_group_last_verify_timestamp_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1700000256
 pbs_group_last_verify_timestamp_seconds{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1700000256
-# HELP pbs_group_last_backup_encrypted Whether the newest snapshot of the backup group is encrypted.
+# HELP pbs_group_last_backup_encrypted Whether the archives of the newest snapshot of the backup group are encrypted (signed only does not count).
 # TYPE pbs_group_last_backup_encrypted gauge
 pbs_group_last_backup_encrypted{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 0
 pbs_group_last_backup_encrypted{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 0
@@ -140,7 +140,8 @@ func TestGroupHistory(t *testing.T) {
 			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1,"protected":true},
 			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1},
 			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1},
-			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1,"fingerprint":"aa:bb"}]}`,
+			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1,"fingerprint":"aa:bb","files":[
+				{"filename":"index.json.blob","crypt-mode":"sign-only"},{"filename":"drive-scsi0.img.fidx","crypt-mode":"encrypt"}]}]}`,
 			1700000000-14*day, 1700000000-7*day, 1700000000-day, 1700000000)},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
@@ -149,7 +150,7 @@ func TestGroupHistory(t *testing.T) {
 # TYPE pbs_group_protected_snapshots gauge
 pbs_group_protected_snapshots{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
 pbs_group_protected_snapshots{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
-# HELP pbs_group_last_backup_encrypted Whether the newest snapshot of the backup group is encrypted.
+# HELP pbs_group_last_backup_encrypted Whether the archives of the newest snapshot of the backup group are encrypted (signed only does not count).
 # TYPE pbs_group_last_backup_encrypted gauge
 pbs_group_last_backup_encrypted{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
 pbs_group_last_backup_encrypted{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
@@ -180,8 +181,9 @@ func TestBackupInterval(t *testing.T) {
 	}
 }
 
-// Backup task worker IDs have no namespace: a group ID that exists in several
-// namespaces is matched by task user and owner, ambiguous ones are skipped.
+// Backup task worker IDs have no namespace: a task belongs to the group its
+// user can write to (owner, or user of an owning token); a task that fits
+// several groups, or a store with unknown groups, is left out.
 func TestMatchBackupTasks(t *testing.T) {
 	group := func(id, owner string) groupItem {
 		return groupItem{BackupType: "vm", BackupID: id, Owner: owner}
@@ -189,36 +191,61 @@ func TestMatchBackupTasks(t *testing.T) {
 	all := []namespaceGroups{
 		{store: "main", ns: "site-a", groups: []groupItem{group("230", "a@pbs"), group("231", "c@pbs"), group("232", "d@pbs!t1"), group("233", "x@pbs"), group("234", "y@pbs")}},
 		{store: "main", ns: "site-b", groups: []groupItem{group("230", "b@pbs!tok"), group("231", "c@pbs"), group("232", "e@pbs")}},
+		{store: "other", ns: "", groups: []groupItem{group("230", "a@pbs")}},
 	}
-	task := func(id, user string, start int64, status string) taskItem {
-		return taskItem{WorkerType: "backup", WorkerID: "main:vm/" + id, User: user, StartTime: start, EndTime: start + 10, Status: status}
+	task := func(store, id, user string, start int64, status string) taskItem {
+		return taskItem{WorkerType: "backup", WorkerID: store + ":vm/" + id, User: user, StartTime: start, EndTime: start + 10, Status: status}
 	}
 	tasks := []taskItem{
-		task("230", "a@pbs", 100, "OK"),
-		task("230", "a@pbs", 200, "backup failed"),
-		task("230", "b@pbs", 300, "OK"),
-		task("230", "b@pbs!tok", 250, "OK"),
-		task("231", "c@pbs", 100, "OK"),
-		task("232", "d@pbs!t2", 100, "OK"),
-		task("233", "x@pbs", 100, "OK"),
-		task("233", "x@pbs", 500, ""), // still running
-		task("234", "other@pbs", 100, "OK"),
-		{WorkerType: "reader", WorkerID: "main:vm/233", User: "r@pbs", StartTime: 900, EndTime: 910, Status: "OK"},
+		task("main", "230", "a@pbs", 100, "OK"),
+		task("main", "230", "a@pbs", 200, "backup failed"),
+		task("main", "230", "b@pbs!tok", 250, "OK"),
+		task("main", "230", "b@pbs", 300, "OK"),    // user of the owning token
+		task("main", "231", "c@pbs", 100, "OK"),    // owner of both groups
+		task("main", "232", "d@pbs!t2", 100, "OK"), // another token of the owner's user
+		task("main", "233", "x@pbs", 100, "OK"),
+		task("main", "233", "x@pbs", 500, ""),      // still running
+		task("main", "234", "root@pam", 100, "OK"), // not the owner
+		task("other", "230", "a@pbs", 50, "OK"),
+		{WorkerType: "reader", WorkerID: "main:vm/233", User: "x@pbs", StartTime: 900, EndTime: 910, Status: "OK"},
 	}
-	got := matchBackupTasks(all, tasks)
 	want := map[groupRef]int64{
-		{"main", "site-a", "vm", "230"}: 200, // newest of a@pbs, failed
-		{"main", "site-b", "vm", "230"}: 250, // exact owner before the user without token
-		{"main", "site-a", "vm", "232"}: 100, // same user, other token
-		{"main", "site-a", "vm", "233"}: 100, // finished tasks only
-		{"main", "site-a", "vm", "234"}: 100, // only group with that ID: any user (e.g. root@pam)
+		{"main", "site-a", "vm", "230"}: 200,
+		{"main", "site-b", "vm", "230"}: 300,
+		{"main", "site-a", "vm", "233"}: 100,
+		{"other", "", "vm", "230"}:      50,
 	}
+	got := matchBackupTasks(all, tasks, nil)
 	if len(got) != len(want) {
 		t.Errorf("matched %d groups, want %d: %v", len(got), len(want), got)
 	}
 	for ref, start := range want {
 		if got[ref].StartTime != start {
 			t.Errorf("%v: matched task started at %d, want %d", ref, got[ref].StartTime, start)
+		}
+	}
+
+	// the groups of a namespace of "main" are unknown: no matches in "main"
+	got = matchBackupTasks(all, tasks, map[string]bool{"main": true})
+	if len(got) != 1 || got[groupRef{"other", "", "vm", "230"}].StartTime != 50 {
+		t.Errorf("matched %v with an incomplete store", got)
+	}
+}
+
+func TestCanWrite(t *testing.T) {
+	for _, tc := range []struct {
+		authID, owner string
+		want          bool
+	}{
+		{"a@pbs", "a@pbs", true},
+		{"a@pbs!tok", "a@pbs!tok", true},
+		{"a@pbs", "a@pbs!tok", true},
+		{"a@pbs!tok", "a@pbs", false},
+		{"a@pbs!t2", "a@pbs!t1", false},
+		{"root@pam", "a@pbs", false},
+	} {
+		if got := canWrite(tc.authID, tc.owner); got != tc.want {
+			t.Errorf("canWrite(%q, %q) = %t, want %t", tc.authID, tc.owner, got, tc.want)
 		}
 	}
 }
@@ -325,5 +352,39 @@ func TestGroupsWithoutSnapshotList(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A key fingerprint is also set for backups that are only signed; encrypted
+// are snapshots whose archives are all encrypted.
+func TestSnapshotEncrypted(t *testing.T) {
+	snap := func(modes ...string) snapshotItem {
+		var s snapshotItem
+		s.Files = append(s.Files, struct {
+			Filename  string `json:"filename"`
+			CryptMode string `json:"crypt-mode"`
+		}{"index.json.blob", "sign-only"})
+		for i, m := range modes {
+			s.Files = append(s.Files, struct {
+				Filename  string `json:"filename"`
+				CryptMode string `json:"crypt-mode"`
+			}{fmt.Sprintf("a%d.fidx", i), m})
+		}
+		return s
+	}
+	for name, tc := range map[string]struct {
+		s    snapshotItem
+		want bool
+	}{
+		"encrypted":  {snap("encrypt", "encrypt"), true},
+		"sign-only":  {snap("sign-only"), false},
+		"plain":      {snap("none"), false},
+		"mixed":      {snap("encrypt", "none"), false},
+		"only index": {snap(), false},
+		"running":    {snapshotItem{}, false},
+	} {
+		if got := tc.s.encrypted(); got != tc.want {
+			t.Errorf("%s: got %t, want %t", name, got, tc.want)
+		}
 	}
 }

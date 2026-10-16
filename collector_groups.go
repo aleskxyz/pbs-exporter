@@ -41,7 +41,7 @@ var (
 	groupLastVerifyTimestamp = groupDesc("last_verify_timestamp_seconds",
 		"Start of the newest verification of any snapshot of the backup group (synced snapshots keep the verification of their source).")
 	groupLastBackupEncrypted = groupDesc("last_backup_encrypted",
-		"Whether the newest snapshot of the backup group is encrypted.")
+		"Whether the archives of the newest snapshot of the backup group are encrypted (signed only does not count).")
 	groupBackupInterval = groupDesc("backup_interval_seconds",
 		"Typical time between snapshots of the backup group: the median of the gaps between its newest 4 snapshots; omitted below 3 snapshots.")
 	groupLastBackupTaskSuccess = groupDesc("last_backup_task_success",
@@ -87,6 +87,23 @@ type groupSummary struct {
 	// lastVerify is the start of the newest verification, 0 if none
 	lastVerify int64
 	times      []int64
+}
+
+// encrypted reports whether all archives of a snapshot are encrypted. The
+// manifest is only signed, and a key fingerprint is also set for backups
+// that are signed, not encrypted ("sign-only").
+func (s snapshotItem) encrypted() bool {
+	archives := 0
+	for _, f := range s.Files {
+		if f.Filename == "index.json.blob" {
+			continue
+		}
+		if f.CryptMode != "encrypt" {
+			return false
+		}
+		archives++
+	}
+	return archives > 0
 }
 
 // finished reports whether a snapshot has a manifest; PBS lists running
@@ -187,9 +204,15 @@ var groupsCollector = &collector{
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		var mu sync.Mutex
 		var all []namespaceGroups
+		// stores with a namespace whose groups are unknown: their backup tasks
+		// could belong to a group that is not seen
+		incomplete := map[string]bool{}
 		nsErr := s.forEachNamespace(ctx, func(store, ns string) error {
 			groups, err := s.getGroups(ctx, store, ns)
 			if err != nil {
+				mu.Lock()
+				incomplete[store] = true
+				mu.Unlock()
 				return err
 			}
 			// the group list stays useful without the snapshots
@@ -206,7 +229,7 @@ var groupsCollector = &collector{
 
 		// the backup tasks are matched to groups over all namespaces of a store
 		tasks, taskErr := s.getTasks(ctx)
-		lastTasks := matchBackupTasks(all, tasks)
+		lastTasks := matchBackupTasks(all, tasks, incomplete)
 		for _, nsg := range all {
 			collectGroupMetrics(nsg, lastTasks, ch)
 		}
@@ -254,7 +277,7 @@ func collectGroupMetrics(nsg namespaceGroups, lastTasks map[groupRef]taskItem, c
 				gauge(groupOldestBackupTimestamp, float64(summary.oldest))
 				gauge(groupLastBackupSize, float64(*newest.Size))
 				encrypted := 0.0
-				if newest.Fingerprint != "" {
+				if newest.encrypted() {
 					encrypted = 1
 				}
 				gauge(groupLastBackupEncrypted, encrypted)
@@ -313,19 +336,23 @@ func parseBackupWorkerID(workerID string) (backupTaskKey, bool) {
 	return backupTaskKey{store, backupType, backupID}, true
 }
 
-// authUser returns the user of an auth ID, without the token name.
-func authUser(authID string) string {
-	user, _, _ := strings.Cut(authID, "!")
-	return user
+// canWrite reports whether a task of authID can have created a snapshot in
+// a group owned by owner: PBS only lets the owner, or the user of an owning
+// API token, add snapshots to a group (there is no exception for root@pam).
+func canWrite(authID, owner string) bool {
+	if authID == owner {
+		return true
+	}
+	user, _, isToken := strings.Cut(owner, "!")
+	return isToken && user == authID
 }
 
 // matchBackupTasks returns the newest finished backup task of each group.
-// The worker ID of a backup task has no namespace. If only one namespace of
-// the store has a group with that type and ID, the task is its, whoever ran
-// it (e.g. root@pam can write to groups it does not own). Otherwise the task
-// user must be the group owner: exactly, then without the token name; a
-// group whose task can not be told apart is left out.
-func matchBackupTasks(all []namespaceGroups, tasks []taskItem) map[groupRef]taskItem {
+// The worker ID of a backup task has no namespace, so a task belongs to the
+// group with its type and ID that the task user can write to. A task that
+// fits groups in several namespaces is left out, and so are the tasks of
+// incomplete stores.
+func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[string]bool) map[groupRef]taskItem {
 	candidates := map[backupTaskKey][]groupRef{}
 	owners := map[groupRef]string{}
 	for _, nsg := range all {
@@ -337,62 +364,26 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem) map[groupRef]task
 		}
 	}
 
-	byKey := map[backupTaskKey][]taskItem{}
+	out := map[groupRef]taskItem{}
 	for _, t := range tasks {
 		if t.WorkerType != "backup" || !t.finished() {
 			continue
 		}
-		if key, ok := parseBackupWorkerID(t.WorkerID); ok {
-			byKey[key] = append(byKey[key], t)
-		}
-	}
-
-	newest := func(tasks []taskItem, keep func(taskItem) bool) (taskItem, bool) {
-		var best taskItem
-		found := false
-		for _, t := range tasks {
-			if keep(t) && (!found || t.StartTime > best.StartTime) {
-				best, found = t, true
-			}
-		}
-		return best, found
-	}
-
-	out := map[groupRef]taskItem{}
-	for key, refs := range candidates {
-		tasks := byKey[key]
-		if len(tasks) == 0 {
+		key, ok := parseBackupWorkerID(t.WorkerID)
+		if !ok || incomplete[key.store] {
 			continue
 		}
-		if len(refs) == 1 {
-			if t, ok := newest(tasks, func(taskItem) bool { return true }); ok {
-				out[refs[0]] = t
+		var match []groupRef
+		for _, ref := range candidates[key] {
+			if canWrite(t.User, owners[ref]) {
+				match = append(match, ref)
 			}
+		}
+		if len(match) != 1 {
 			continue
 		}
-		for _, ref := range refs {
-			owner := owners[ref]
-			for _, same := range []func(a, b string) bool{
-				func(a, b string) bool { return a == b },
-				func(a, b string) bool { return authUser(a) == authUser(b) },
-			} {
-				shared := false
-				for _, other := range refs {
-					if other != ref && same(owners[other], owner) {
-						shared = true
-					}
-				}
-				t, ok := newest(tasks, func(t taskItem) bool { return same(t.User, owner) })
-				if !ok {
-					continue
-				}
-				if !shared {
-					out[ref] = t
-				}
-				// a matching task was found; if it is ambiguous, a looser
-				// comparison would not help
-				break
-			}
+		if prev, ok := out[match[0]]; !ok || t.StartTime > prev.StartTime {
+			out[match[0]] = t
 		}
 	}
 	return out
