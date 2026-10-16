@@ -142,7 +142,9 @@ pbs_collector_success{collector="node"} 1
 pbs_collector_success{collector="snapshots"} 1
 pbs_collector_success{collector="sync"} 0
 pbs_collector_success{collector="tasks"} 1
+pbs_collector_success{collector="time"} 1
 pbs_collector_success{collector="version"} 1
+pbs_collector_success{collector="zfs"} 1
 `, "pbs_job_last_run_success", "pbs_job_last_run_end_timestamp_seconds", "pbs_job_next_run_timestamp_seconds",
 		"pbs_job_last_run_duration_seconds", "pbs_sync_job_info", "pbs_remote_info", "pbs_collector_success")
 	if !strings.Contains(logs.String(), "missing privilege Remote.Audit on /remote") {

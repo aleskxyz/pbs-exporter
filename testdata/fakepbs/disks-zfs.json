@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"name": "backup-pool", "health": "DEGRADED", "size": 200000000000000, "alloc": 50000000000000, "free": 150000000000000, "frag": 3, "dedup": 1.0},
+    {"name": "rpool", "health": "ONLINE", "size": 480000000000, "alloc": 6000000000, "free": 474000000000, "frag": 20, "dedup": 1.0}
+  ]
+}

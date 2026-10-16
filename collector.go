@@ -48,6 +48,8 @@ func allCollectors() []*collector {
 		jobsCollector,
 		syncCollector,
 		tasksCollector,
+		zfsCollector,
+		timeCollector,
 	}
 }
 

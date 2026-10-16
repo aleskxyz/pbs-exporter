@@ -67,7 +67,9 @@ pbs_collector_success{collector="jobs"} 1
 pbs_collector_success{collector="node"} 1
 pbs_collector_success{collector="sync"} 1
 pbs_collector_success{collector="tasks"} 1
+pbs_collector_success{collector="time"} 1
 pbs_collector_success{collector="version"} 1
+pbs_collector_success{collector="zfs"} 1
 `, "pbs_collector_success")
 }
 
