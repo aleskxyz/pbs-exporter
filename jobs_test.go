@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -145,25 +146,22 @@ pbs_collector_success{collector="version"} 1
 	if !strings.Contains(logs.String(), "missing privilege Remote.Audit on /remote") {
 		t.Errorf("the log does not name the missing privilege:\n%s", logs)
 	}
-	for _, r := range srv.Requests() {
-		if strings.Contains(r, "/admin/sync") || strings.Contains(r, "/config/remote") {
-			t.Errorf("unexpected request %s without Remote.Audit", r)
-		}
-	}
 }
 
-func TestHasPrivilege(t *testing.T) {
-	perms := map[string]map[string]any{
-		"/":               {"Sys.Audit": true},
-		"/remote/pbs-b":   {"Remote.Audit": false},
-		"/remotely-other": {"Remote.Audit": true},
-	}
-	if !hasPrivilege(perms, "/remote", "Remote.Audit") {
-		t.Error("privilege on a path below /remote must count")
-	}
-	delete(perms, "/remote/pbs-b")
-	if hasPrivilege(perms, "/remote", "Remote.Audit") {
-		t.Error("a path that only starts with /remote must not count")
+func TestHasRemoteAudit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		perms map[string]map[string]any
+		want  bool
+	}{
+		"on /remote":      {map[string]map[string]any{"/remote": {"Remote.Audit": true}}, true},
+		"propagated":      {map[string]map[string]any{"/": {"Sys.Audit": true}, "/remote": {"Remote.Audit": false}}, true},
+		"one remote only": {map[string]map[string]any{"/remote": {"Sys.Audit": true}, "/remote/pbs-b": {"Remote.Audit": true}}, false},
+		"similar path":    {map[string]map[string]any{"/remotely-other": {"Remote.Audit": true}}, false},
+		"none":            {map[string]map[string]any{}, false},
+	} {
+		if got := hasRemoteAudit(tc.perms); got != tc.want {
+			t.Errorf("%s: got %t, want %t", name, got, tc.want)
+		}
 	}
 }
 
@@ -198,5 +196,94 @@ func TestTaskLogQuery(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "more tasks than task_limit") {
 		t.Errorf("no warning about the task limit:\n%s", logs)
+	}
+}
+
+// With Remote.Audit on one remote only, PBS lists only that remote's jobs;
+// the others come from the task log and the collector reports the gap.
+func TestSyncJobsWithPartialRemoteAudit(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions": {body: `{"data":{"/remote":{"Sys.Audit":true},"/remote/pbs-b":{"Remote.Audit":true}}}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
+	got := seriesOf(t, e, "pbs_job_last_run_success", "pbs_collector_success")
+	for _, want := range []string{
+		`pbs_job_last_run_success{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 1`,
+		`pbs_job_last_run_success{job_id="s-2",job_type="sync",pbs_namespace="",source="tasks",store="store1"} 1`,
+		`pbs_collector_success{collector="sync"} 0`,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing %s in\n%s", want, strings.Join(got, "\n"))
+		}
+	}
+	for _, line := range got {
+		if strings.Contains(line, `job_id="s-1"`) && strings.Contains(line, `source="tasks"`) {
+			t.Errorf("a listed job is also taken from the task log: %s", line)
+		}
+	}
+}
+
+// Without Remote.Audit but also without sync jobs of remotes, nothing is
+// missing: the collector succeeds.
+func TestSyncWithoutRemoteJobs(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions":            {body: `{"data":{"/remote":{"Sys.Audit":true}}}`},
+		"/api2/json/admin/sync?sync-direction=all": {body: `{"data":[]}`},
+		"/api2/json/config/remote":                 {body: `{"data":[]}`},
+		"/api2/json/nodes/localhost/tasks":         {body: `{"data":[]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
+	if got := seriesOf(t, e, "pbs_collector_success"); !slices.Contains(got, `pbs_collector_success{collector="sync"} 1`) {
+		t.Errorf("sync collector failed:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// While a job runs, PBS reports the running task without state and end; the
+// previous run comes from the task log.
+func TestRunningJobUsesPreviousRun(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/verify": {body: `{"data":[{"id":"v-1","store":"store1","ns":"","schedule":"sat 02:00","next-run":1700604800,
+			"last-run-upid":"UPID:pbs:00000001:00000002:00000009:6553F100:verificationjob:store1\\x3av\\x2d1:root@pam:"}]}`},
+		"/api2/json/admin/gc": {body: `{"data":[{"store":"store1","next-run":1700604800,
+			"upid":"UPID:pbs:00000001:00000002:00000008:6553F100:garbage_collection:store1:root@pam:"}]}`},
+		"/api2/json/nodes/localhost/tasks": {body: `{"data":[
+			{"upid":"x","worker_type":"verificationjob","worker_id":"store1:v-1","user":"root@pam","starttime":1700000000},
+			{"upid":"x","worker_type":"verificationjob","worker_id":"store1:v-1","user":"root@pam","starttime":1699395200,"endtime":1699398800,"status":"WARNINGS: 1"},
+			{"upid":"x","worker_type":"verificationjob","worker_id":"store1:v-1","user":"root@pam","starttime":1698790400,"endtime":1698791400,"status":"OK"},
+			{"upid":"x","worker_type":"verificationjob","worker_id":"store1:v-2","user":"root@pam","starttime":1699999000,"endtime":1699999500,"status":"OK"},
+			{"upid":"x","worker_type":"garbage_collection","worker_id":"store1","user":"root@pam","starttime":1699395200,"endtime":1699396200,"status":"OK"}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"sync": false}})
+	got := seriesOf(t, e, "pbs_job_last_run_success", "pbs_job_last_run_end_timestamp_seconds", "pbs_job_last_run_duration_seconds", "pbs_job_interval_seconds")
+	for _, want := range []string{
+		`pbs_job_last_run_success{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 0`,
+		`pbs_job_last_run_end_timestamp_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 1.6993988e+09`,
+		`pbs_job_last_run_duration_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 3600`,
+		`pbs_job_interval_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 604800`,
+		`pbs_job_last_run_success{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1`,
+		`pbs_job_last_run_duration_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1000`,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing %s in\n%s", want, strings.Join(got, "\n"))
+		}
+	}
+}
+
+func TestParseUPIDWorker(t *testing.T) {
+	for upid, want := range map[string][2]string{
+		`UPID:Server3309-PBS-ENF:0000139F:000008BF:00001DA6:6AD10890:prune:PBS\x2d3309\x2dENF\x2dDC01\x3a\x3avm-1560:root@pam:`:                           {"prune", "PBS-3309-ENF-DC01::vm/1560"},
+		`UPID:pbs-01:0001ECCC:007E92D3:00000390:6ACA9940:syncjob:PBS_DC1\x3aPBS\x2d3309\x2dENF\x2dDC01\x3amain\x3aDC1\x3as\x2d431d459b\x2d634d:root@pam:`: {"syncjob", "PBS_DC1:PBS-3309-ENF-DC01:main:DC1:s-431d459b-634d"},
+		`UPID:pbs:1:2:3:6553F100:verificationjob:store1\x3av\x2d1:root@pam:`:                                                                              {"verificationjob", "store1:v-1"},
+	} {
+		typ, id, ok := parseUPIDWorker(upid)
+		if !ok || typ != want[0] || id != want[1] {
+			t.Errorf("%s: got %q %q %t", upid, typ, id, ok)
+		}
+	}
+	if _, _, ok := parseUPIDWorker("UPID:short"); ok {
+		t.Error("expected no match")
+	}
+	if got, _ := parseSyncWorkerID("-:store2:store1::s-local"); got.remote != "" || got.remoteStore != "store2" {
+		t.Errorf("local sync job: %+v", got)
 	}
 }

@@ -51,11 +51,44 @@ type jobRun struct {
 	next       int64
 	// duration is -1 when it has to be derived from start and end
 	duration int64
+	// workerType and workerID identify the tasks of a running job, to find
+	// its previous run in the task log
+	workerType, workerID string
 }
 
 func (st jobStatus) run() jobRun {
 	start, _ := parseUPIDStart(st.LastRunUPID)
-	return jobRun{state: st.LastRunState, start: start, end: st.LastRunEnd, next: st.NextRun, duration: -1}
+	run := jobRun{state: st.LastRunState, start: start, end: st.LastRunEnd, next: st.NextRun, duration: -1}
+	// while the job runs, PBS reports the running task without state
+	if st.LastRunState == "" {
+		run.workerType, run.workerID, _ = parseUPIDWorker(st.LastRunUPID)
+	}
+	return run
+}
+
+// withPreviousRun completes the run of a job that is running right now: PBS
+// then reports no state and end, so they are taken from the newest finished
+// task of the job in the task log. The interval stays measured from the start
+// of the running task.
+func (s *scrapeState) withPreviousRun(ctx context.Context, run jobRun) (jobRun, error) {
+	if run.state != "" || run.workerType == "" {
+		return run, nil
+	}
+	tasks, err := s.getTasks(ctx)
+	if err != nil {
+		return run, err
+	}
+	var prev *taskItem
+	for i, t := range tasks {
+		if t.WorkerType == run.workerType && t.WorkerID == run.workerID && t.finished() &&
+			(prev == nil || t.StartTime > prev.StartTime) {
+			prev = &tasks[i]
+		}
+	}
+	if prev != nil {
+		run.state, run.end, run.duration = prev.Status, prev.EndTime, prev.EndTime-prev.StartTime
+	}
+	return run, nil
 }
 
 // collectJobRun exports the run metrics of a job. Values PBS does not report
@@ -177,12 +210,15 @@ func collectVerifyJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus
 	if err := s.api.get(ctx, apiPath("admin", "verify"), nil, &jobs); err != nil {
 		return err
 	}
+	var errs []error
 	for _, j := range jobs {
-		collectJobRun(ch, j.run(), "verify", j.ID, j.Store, j.Namespace, "config")
+		run, err := s.withPreviousRun(ctx, j.run())
+		errs = append(errs, err)
+		collectJobRun(ch, run, "verify", j.ID, j.Store, j.Namespace, "config")
 		ch <- prometheus.MustNewConstMetric(verifyJobInfo, prometheus.GaugeValue, 1,
 			j.ID, j.Store, j.Namespace, optInt(j.OutdatedAfter), optBool(j.IgnoreVerified), optInt(j.MaxDepth), j.Schedule)
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func collectPruneJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -190,13 +226,16 @@ func collectPruneJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.
 	if err := s.api.get(ctx, apiPath("admin", "prune"), nil, &jobs); err != nil {
 		return err
 	}
+	var errs []error
 	for _, j := range jobs {
-		collectJobRun(ch, j.run(), "prune", j.ID, j.Store, j.Namespace, "config")
+		run, err := s.withPreviousRun(ctx, j.run())
+		errs = append(errs, err)
+		collectJobRun(ch, run, "prune", j.ID, j.Store, j.Namespace, "config")
 		for keep, v := range j.set() {
 			ch <- prometheus.MustNewConstMetric(pruneJobKeep, prometheus.GaugeValue, float64(v), j.ID, j.Store, j.Namespace, keep)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func collectGCJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -204,14 +243,21 @@ func collectGCJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Met
 	if err := s.api.get(ctx, apiPath("admin", "gc"), nil, &jobs); err != nil {
 		return err
 	}
+	var errs []error
 	for _, j := range jobs {
 		start, _ := parseUPIDStart(j.UPID)
 		run := jobRun{state: j.LastRunState, start: start, end: j.LastRunEnd, next: j.NextRun, duration: -1}
 		if j.Duration != nil {
 			run.duration = *j.Duration
 		}
+		if j.LastRunState == "" {
+			// running: the previous run is the newest finished GC task
+			run.workerType, run.workerID, run.duration = "garbage_collection", j.Store, -1
+		}
+		run, err := s.withPreviousRun(ctx, run)
+		errs = append(errs, err)
 		// GC runs per datastore, the store is its job ID
 		collectJobRun(ch, run, "gc", j.Store, j.Store, "", "config")
 	}
-	return nil
+	return errors.Join(errs...)
 }
