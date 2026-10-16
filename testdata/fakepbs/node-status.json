@@ -1,0 +1,12 @@
+{
+  "data": {
+    "cpu": 0.25,
+    "wait": 0.01,
+    "uptime": 3600,
+    "loadavg": [0.5, 0.25, 0.125],
+    "memory": {"free": 100, "total": 300, "used": 200},
+    "swap": {"free": 10, "total": 30, "used": 20},
+    "root": {"avail": 1, "total": 3, "used": 2},
+    "current-kernel": {"machine": "x86_64", "release": "6.8.12-4-pve", "sysname": "Linux"}
+  }
+}

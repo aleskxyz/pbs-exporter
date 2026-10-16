@@ -1,0 +1,394 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+)
+
+// testModule builds a config file module for srv.
+func testModule(t *testing.T, srv *fakeServer, mc ModuleConfig) *Module {
+	t.Helper()
+	mc.User, mc.TokenName, mc.TokenValue, mc.Endpoint = "mon@pbs", "exporter", "secret", srv.URL
+	return testModules(t, Config{"site": mc}, nil)["site"]
+}
+
+func testExporter(t *testing.T, srv *fakeServer, mc ModuleConfig) *Exporter {
+	t.Helper()
+	return NewExporter(context.Background(), srv.URL, testModule(t, srv, mc), 10*time.Second)
+}
+
+// compare checks the given metrics of one scrape against the exposition text.
+func compare(t *testing.T, e *Exporter, expected string, names ...string) {
+	t.Helper()
+	if err := testutil.CollectAndCompare(e, strings.NewReader(expected), names...); err != nil {
+		t.Error(err)
+	}
+}
+
+// captureLogs collects the log output of the test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+var allOK = map[string]float64{"datastores": 1, "node": 1, "snapshots": 1, "version": 1}
+
+func collectorStatus(collectors map[string]float64) string {
+	var b strings.Builder
+	b.WriteString("# HELP pbs_collector_success Whether a collector succeeded in the last scrape.\n# TYPE pbs_collector_success gauge\n")
+	for _, name := range []string{"datastores", "node", "snapshots", "version"} {
+		if v, ok := collectors[name]; ok {
+			fmt.Fprintf(&b, "pbs_collector_success{collector=%q} %g\n", name, v)
+		}
+	}
+	return b.String()
+}
+
+func TestScrapeValues(t *testing.T) {
+	srv := newFakePBS(t, nil)
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, collectorStatus(allOK)+`
+# HELP pbs_up Was the last query of PBS successful (the version call).
+# TYPE pbs_up gauge
+pbs_up 1
+# HELP pbs_info Module and endpoint host of the scraped PBS.
+# TYPE pbs_info gauge
+pbs_info{endpoint_host="127.0.0.1",module="site"} 1
+# HELP pbs_version Version of the PBS installation.
+# TYPE pbs_version gauge
+pbs_version{release="2",repoid="0123abcd",version="4.2"} 1
+# HELP pbs_available The available bytes of the underlying storage.
+# TYPE pbs_available gauge
+pbs_available{datastore="store1"} 1000
+# HELP pbs_used The used bytes of the underlying storage.
+# TYPE pbs_used gauge
+pbs_used{datastore="store1"} 2000
+# HELP pbs_snapshot_count The total number of backups.
+# TYPE pbs_snapshot_count gauge
+pbs_snapshot_count{datastore="store1",namespace=""} 3
+pbs_snapshot_count{datastore="store1",namespace="site-a"} 1
+# HELP pbs_snapshot_vm_last_timestamp The timestamp of the last backup of a VM.
+# TYPE pbs_snapshot_vm_last_timestamp gauge
+pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="",vm_id="100",vm_name="web"} 1700086400
+pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="",vm_id="101",vm_name="db"} 1700000000
+pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="site-a",vm_id="200",vm_name="app"} 1700000000
+# HELP pbs_snapshot_vm_last_verify The verify status of the last backup of a VM.
+# TYPE pbs_snapshot_vm_last_verify gauge
+pbs_snapshot_vm_last_verify{datastore="store1",namespace="",vm_id="100",vm_name="web"} 0
+pbs_snapshot_vm_last_verify{datastore="store1",namespace="",vm_id="101",vm_name="db"} 1
+pbs_snapshot_vm_last_verify{datastore="store1",namespace="site-a",vm_id="200",vm_name="app"} 0
+# HELP pbs_host_load15 The load for 15 minutes of the host.
+# TYPE pbs_host_load15 gauge
+pbs_host_load15 0.125
+# HELP pbs_host_subscription_due_timestamp_seconds The subscription next due timestamp (unix seconds) of the host.
+# TYPE pbs_host_subscription_due_timestamp_seconds gauge
+pbs_host_subscription_due_timestamp_seconds{productname="Proxmox Backup Server Basic"} 1893456000
+`, "pbs_collector_success", "pbs_up", "pbs_info", "pbs_version", "pbs_available", "pbs_used", "pbs_snapshot_count",
+		"pbs_snapshot_vm_last_timestamp", "pbs_snapshot_vm_last_verify", "pbs_host_load15", "pbs_host_subscription_due_timestamp_seconds")
+}
+
+// A failing endpoint only fails its own collector.
+func TestCollectorFailureIsIsolated(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/nodes/localhost/status": {status: http.StatusInternalServerError, body: `{"data":null,"message":"boom"}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 0, "snapshots": 1, "version": 1})+`
+# HELP pbs_up Was the last query of PBS successful (the version call).
+# TYPE pbs_up gauge
+pbs_up 1
+# HELP pbs_available The available bytes of the underlying storage.
+# TYPE pbs_available gauge
+pbs_available{datastore="store1"} 1000
+`, "pbs_collector_success", "pbs_up", "pbs_available", "pbs_host_cpu_usage")
+	// the subscription of the same collector is still exported
+	if n := testutil.CollectAndCount(e, "pbs_host_subscription_info"); n != 1 {
+		t.Errorf("pbs_host_subscription_info: %d series, want 1", n)
+	}
+	if !strings.Contains(logs.String(), "/api2/json/nodes/localhost/status: HTTP 500: boom") {
+		t.Errorf("the log does not name path, status and message:\n%s", logs)
+	}
+}
+
+func TestForbiddenNamesPrivilege(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/namespace": {status: http.StatusForbidden, body: `{"data":null,"message":"permission check failed"}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "snapshots": 0, "version": 1}), "pbs_collector_success")
+	if !strings.Contains(logs.String(), `required_privilege="Datastore.Audit on /datastore"`) {
+		t.Errorf("the log does not name the privilege:\n%s", logs)
+	}
+}
+
+// The scrape timeout from Prometheus cuts off slow calls; the scrape still
+// answers with pbs_up and the collector status.
+func TestScrapeDeadlineFromHeader(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/snapshots?ns=site-a": {body: `{"data":[]}`, delay: 10 * time.Second},
+	})
+	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{Timeout: "1m"})}, true, testTimeouts)
+	req := httptest.NewRequest("GET", "/metrics?module=site", nil)
+	req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "1.5")
+
+	start := time.Now()
+	code, body := scrapeRequest(t, h, req)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("scrape took %s, want about 1s", d)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	for _, want := range []string{
+		"\npbs_up 1\n",
+		`pbs_collector_success{collector="snapshots"} 0`,
+		`pbs_collector_success{collector="datastores"} 1`,
+		`pbs_snapshot_count{datastore="store1",namespace=""} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestScrapeTimeout(t *testing.T) {
+	timeouts := scrapeTimeouts{fallback: 30 * time.Second, offset: 500 * time.Millisecond}
+	for header, want := range map[string]time.Duration{
+		"":      30 * time.Second,
+		"10":    9500 * time.Millisecond,
+		"2.5":   2 * time.Second,
+		"0.4":   400 * time.Millisecond, // shorter than the offset: not reduced
+		"0":     30 * time.Second,
+		"-1":    30 * time.Second,
+		"NaN":   30 * time.Second,
+		"+Inf":  30 * time.Second,
+		"soon":  30 * time.Second,
+		"1e300": 30 * time.Second,
+	} {
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		if header != "" {
+			req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", header)
+		}
+		if got := timeouts.scrapeTimeout(req); got != want {
+			t.Errorf("%q: got %s, want %s", header, got, want)
+		}
+	}
+}
+
+func TestShortLoadavg(t *testing.T) {
+	for _, load := range []string{`"loadavg":[0.5],`, ``, `"loadavg":null,`} {
+		srv := newFakePBS(t, map[string]fakeResp{
+			"/api2/json/nodes/localhost/status": {body: `{"data":{` + load + `"cpu":0.1,"memory":{},"swap":{},"root":{}}}`},
+		})
+		e := testExporter(t, srv, ModuleConfig{})
+		compare(t, e, collectorStatus(allOK), "pbs_collector_success")
+		if n := testutil.CollectAndCount(e, "pbs_host_load1", "pbs_host_load5", "pbs_host_load15"); n != 0 {
+			t.Errorf("%q: %d load series, want none", load, n)
+		}
+	}
+}
+
+// Store names and namespaces are escaped in the request URLs.
+func TestRequestEscaping(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/status/datastore-usage":                              {body: `{"data":[{"store":"st&1 x","mount-status":"nonremovable"}]}`},
+		"/api2/json/admin/datastore":                                     {body: `{"data":[{"store":"st&1 x"}]}`},
+		"/api2/json/admin/datastore/st&1%20x/namespace":                  {body: `{"data":[{"ns":"a/b&c=d"}]}`},
+		"/api2/json/admin/datastore/st&1%20x/snapshots?ns=a%2Fb%26c%3Dd": {body: `{"data":[{"backup-type":"vm","backup-id":"1","backup-time":1}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, `
+# HELP pbs_snapshot_count The total number of backups.
+# TYPE pbs_snapshot_count gauge
+pbs_snapshot_count{datastore="st&1 x",namespace="a/b&c=d"} 1
+`, "pbs_snapshot_count")
+}
+
+func TestSubscriptionWithoutDueDate(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/nodes/localhost/subscription": {body: `{"data":{"status":"notfound"}}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, `
+# HELP pbs_host_subscription_info The subscription info of the host.
+# TYPE pbs_host_subscription_info gauge
+pbs_host_subscription_info{productname="unknown",status="notfound"} 1
+`, "pbs_host_subscription_info", "pbs_host_subscription_due_timestamp_seconds")
+}
+
+// Unmounted datastores and those in a maintenance mode that blocks reading
+// are not scanned; a datastore that is being deleted is skipped without error.
+func TestDatastoreAvailability(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/status/datastore-usage": {body: `{"data":[
+			{"store":"store1","mount-status":"nonremovable"},
+			{"store":"usb","mount-status":"notmounted"},
+			{"store":"offline","mount-status":"nonremovable"},
+			{"store":"ro","mount-status":"nonremovable"},
+			{"store":"gone","mount-status":"nonremovable"}]}`},
+		"/api2/json/admin/datastore": {body: `{"data":[
+			{"store":"store1"},{"store":"usb"},
+			{"store":"offline","maintenance":"type=offline,message=disk swap"},
+			{"store":"ro","maintenance":"read-only"},
+			{"store":"gone"}]}`},
+		"/api2/json/admin/datastore/ro/namespace":     {body: `{"data":[{"ns":""}]}`},
+		"/api2/json/admin/datastore/ro/snapshots?ns=": {body: `{"data":[]}`},
+		"/api2/json/admin/datastore/gone/namespace":   {status: http.StatusBadRequest, body: `{"data":null,"message":"datastore is being deleted"}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, collectorStatus(allOK), "pbs_collector_success")
+
+	var scanned []string
+	for _, r := range srv.Requests() {
+		if store, ok := strings.CutPrefix(r, "/api2/json/admin/datastore/"); ok && strings.HasSuffix(store, "/namespace") {
+			scanned = append(scanned, strings.TrimSuffix(store, "/namespace"))
+		}
+	}
+	slices.Sort(scanned)
+	if want := []string{"gone", "ro", "store1"}; !slices.Equal(scanned, want) {
+		t.Errorf("scanned datastores %v, want %v", scanned, want)
+	}
+	// every datastore keeps its usage metrics
+	if n := testutil.CollectAndCount(e, "pbs_size"); n != 5 {
+		t.Errorf("pbs_size: %d series, want 5", n)
+	}
+}
+
+func TestMaintenanceType(t *testing.T) {
+	for in, want := range map[string]string{
+		"type=offline,message=x":   "offline",
+		"message=x,type=read-only": "read-only",
+		"offline":                  "offline",
+		"offline,message=x":        "offline",
+		"":                         "",
+	} {
+		if got := maintenanceType(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDisabledCollector(t *testing.T) {
+	srv := newFakePBS(t, nil)
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false}})
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "version": 1}), "pbs_collector_success")
+	for _, r := range srv.Requests() {
+		if strings.Contains(r, "/namespace") || strings.Contains(r, "/snapshots") {
+			t.Errorf("disabled collector made request %s", r)
+		}
+	}
+}
+
+// The requests of all scrapes of a module are limited by max_concurrency.
+func TestMaxConcurrency(t *testing.T) {
+	overrides := map[string]fakeResp{}
+	var namespaces []string
+	for i := range 12 {
+		ns := fmt.Sprintf("ns%d", i)
+		namespaces = append(namespaces, fmt.Sprintf(`{"ns":%q}`, ns))
+		overrides["/api2/json/admin/datastore/store1/snapshots?ns="+ns] = fakeResp{body: `{"data":[]}`, delay: 20 * time.Millisecond}
+	}
+	overrides["/api2/json/admin/datastore/store1/namespace"] = fakeResp{body: `{"data":[` + strings.Join(namespaces, ",") + `]}`}
+	srv := newFakePBS(t, overrides)
+	m := testModule(t, srv, ModuleConfig{MaxConcurrency: 2})
+
+	done := make(chan struct{})
+	for range 3 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_ = testutil.CollectAndCount(NewExporter(context.Background(), srv.URL, m, 10*time.Second))
+		}()
+	}
+	for range 3 {
+		<-done
+	}
+	if got := srv.MaxInFlight(); got > 2 {
+		t.Errorf("%d concurrent requests, want at most 2", got)
+	}
+}
+
+func TestCollectorConfig(t *testing.T) {
+	const body = "  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n"
+	cfg, err := ParseConfig([]byte("a:\n" + body + "  max_concurrency: 8\n  collectors:\n    snapshots: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modules, err := BuildModules(cfg, nil, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := modules["a"]
+	var names []string
+	for _, c := range m.collectors {
+		names = append(names, c.name)
+	}
+	if want := []string{"version", "node", "datastores"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
+		t.Errorf("collectors %v, max_concurrency %d", names, m.maxConcurrency)
+	}
+
+	for name, in := range map[string]string{
+		"unknown collector": "a:\n" + body + "  collectors:\n    nope: true\n",
+		"disabled version":  "a:\n" + body + "  collectors:\n    version: false\n",
+		"neg concurrency":   "a:\n" + body + "  max_concurrency: -1\n",
+		"collectors list":   "a:\n" + body + "  collectors: [node]\n",
+	} {
+		if _, err := ParseConfig([]byte(in)); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+
+	if got, err := parseCollectorList(" node , -snapshots,"); err != nil || len(got) != 2 || !got["node"] || got["snapshots"] {
+		t.Errorf("parseCollectorList: %v, %v", got, err)
+	}
+	for _, in := range []string{"bogus", "-version", "-"} {
+		if _, err := parseCollectorList(in); err == nil {
+			t.Errorf("%q: expected an error", in)
+		}
+	}
+}
+
+func TestErrText(t *testing.T) {
+	err := errors.Join(errors.New("a: failed"), errors.New("b: failed\r\nforged"))
+	if got, want := errText(err), "a: failed; b: failed; forged"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestAPIError(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	for body, want := range map[string]string{
+		`{"data":null,"message":"permission check failed\n"}`: "permission check failed",
+		"plain\r\ntext":                          "plaintext",
+		`{"data":null,"message":"` + long + `"}`: strings.Repeat("x", maxErrorMessage) + "…",
+		"":                                       "",
+	} {
+		if got := errorMessage([]byte(body)); got != want {
+			t.Errorf("%q: got %q, want %q", body, got, want)
+		}
+	}
+
+	err := fmt.Errorf("wrapped: %w", &APIError{Path: "/api2/json/version", Status: 403, Message: "permission check failed"})
+	if !IsForbidden(err) || IsForbidden(errors.New("other")) {
+		t.Error("IsForbidden does not detect a wrapped 403")
+	}
+	if got, want := err.Error(), "wrapped: /api2/json/version: HTTP 403: permission check failed"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

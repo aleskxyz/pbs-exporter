@@ -2,28 +2,16 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
-
-const promNamespace = "pbs"
-const versionApi = "/api2/json/version"
-const datastoreUsageApi = "/api2/json/status/datastore-usage"
-const datastoreApi = "/api2/json/admin/datastore"
-const nodeApi = "/api2/json/nodes"
 
 // These variables are set in build step
 var Version = "v0.0.0-dev.0"
@@ -44,835 +32,42 @@ var (
 		"Proxmox Backup Server timeout")
 	insecure = flag.String("pbs.insecure", "false",
 		"Proxmox Backup Server insecure")
+	maxConcurrency = flag.String("pbs.max-concurrency", strconv.Itoa(defaultMaxConcurrency),
+		"Maximum number of concurrent requests to the Proxmox Backup Server")
+	collectorList = flag.String("pbs.collectors", "",
+		"Collectors to enable (name) or disable (-name), comma separated, e.g. \"access,-apt\"")
 	metricsPath = flag.String("pbs.metrics-path", "/metrics",
 		"Path under which to expose metrics")
 	listenAddress = flag.String("pbs.listen-address", ":10019",
 		"Address on which to expose metrics")
+	scrapeTimeout = flag.String("pbs.scrape-timeout", "30s",
+		"Time limit of a scrape if Prometheus does not send X-Prometheus-Scrape-Timeout-Seconds")
+	scrapeTimeoutOffset = flag.String("pbs.scrape-timeout-offset", "500ms",
+		"Subtracted from the scrape timeout sent by Prometheus, to leave time for sending the response")
 	loglevel = flag.String("pbs.loglevel", "info",
-		"Loglevel")
+		"Loglevel (debug, info, warn, error)")
 	configFile = flag.String("pbs.config-file", "",
 		"Path to a YAML file with named modules (credentials per Proxmox Backup Server), selected per scrape with ?module=")
 	showVersion = flag.Bool("version", false, "Show version and exit")
-
-	// Metrics
-	up = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "up"),
-		"Was the last query of PBS successful.",
-		nil, nil,
-	)
-	version = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "version"),
-		"Version of the PBS installation.",
-		[]string{"version", "repoid", "release"}, nil,
-	)
-	available = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "available"),
-		"The available bytes of the underlying storage.",
-		[]string{"datastore"}, nil,
-	)
-	size = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "size"),
-		"The size of the underlying storage in bytes.",
-		[]string{"datastore"}, nil,
-	)
-	used = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "used"),
-		"The used bytes of the underlying storage.",
-		[]string{"datastore"}, nil,
-	)
-	snapshot_count = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_count"),
-		"The total number of backups.",
-		[]string{"datastore", "namespace"}, nil,
-	)
-	snapshot_vm_count = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_count"),
-		"The total number of backups per VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
-	snapshot_vm_last_timestamp = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_last_timestamp"),
-		"The timestamp of the last backup of a VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
-	snapshot_vm_last_verify = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_last_verify"),
-		"The verify status of the last backup of a VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
-	subscription_status = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_status"),
-		"The subscription status of the host.",
-		[]string{"status"}, nil,
-	)
-	subscription_info = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_info"),
-		"The subscription info of the host.",
-		[]string{"productname", "status"}, nil,
-	)
-	subscription_due_timestamp_seconds = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_due_timestamp_seconds"),
-		"The subscription next due timestamp (unix seconds) of the host.",
-		[]string{"productname"}, nil,
-	)
-	host_cpu_usage = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_cpu_usage"),
-		"The CPU usage of the host.",
-		nil, nil,
-	)
-	host_memory_free = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_memory_free"),
-		"The free memory of the host.",
-		nil, nil,
-	)
-	host_memory_total = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_memory_total"),
-		"The total memory of the host.",
-		nil, nil,
-	)
-	host_memory_used = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_memory_used"),
-		"The used memory of the host.",
-		nil, nil,
-	)
-	host_swap_free = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_swap_free"),
-		"The free swap of the host.",
-		nil, nil,
-	)
-	host_swap_total = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_swap_total"),
-		"The total swap of the host.",
-		nil, nil,
-	)
-	host_swap_used = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_swap_used"),
-		"The used swap of the host.",
-		nil, nil,
-	)
-	host_disk_available = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_disk_available"),
-		"The available disk of the local root disk in bytes.",
-		nil, nil,
-	)
-	host_disk_total = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_disk_total"),
-		"The total disk of the local root disk in bytes.",
-		nil, nil,
-	)
-	host_disk_used = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_disk_used"),
-		"The used disk of the local root disk in bytes.",
-		nil, nil,
-	)
-	host_uptime = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_uptime"),
-		"The uptime of the host.",
-		nil, nil,
-	)
-	host_io_wait = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_io_wait"),
-		"The io wait of the host.",
-		nil, nil,
-	)
-	host_load1 = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_load1"),
-		"The load for 1 minute of the host.",
-		nil, nil,
-	)
-	host_load5 = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_load5"),
-		"The load for 5 minutes of the host.",
-		nil, nil,
-	)
-	host_load15 = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_load15"),
-		"The load for 15 minutes of the host.",
-		nil, nil,
-	)
 )
-
-type VersionResponse struct {
-	Data struct {
-		Release string `json:"release"`
-		Repoid  string `json:"repoid"`
-		Version string `json:"version"`
-	} `json:"data"`
-}
-
-type DatastoreResponse struct {
-	Data []struct {
-		Avail     int64  `json:"avail"`
-		Store     string `json:"store"`
-		Total     int64  `json:"total"`
-		Used      int64  `json:"used"`
-		Namespace string `json:"ns"`
-	} `json:"data"`
-}
-
-type Datastore struct {
-	Avail     int64  `json:"avail"`
-	Store     string `json:"store"`
-	Total     int64  `json:"total"`
-	Used      int64  `json:"used"`
-	Namespace string `json:"ns"`
-}
-
-type NamespaceResponse struct {
-	Data []struct {
-		Namespace string `json:"ns"`
-	} `json:"data"`
-}
-
-type SnapshotResponse struct {
-	Data []struct {
-		BackupID     string `json:"backup-id"`
-		BackupTime   int64  `json:"backup-time"`
-		VMName       string `json:"comment"`
-		Verification struct {
-			State string `json:"state"`
-		} `json:"verification"`
-	} `json:"data"`
-}
-
-type HostResponse struct {
-	Data struct {
-		CPU float64 `json:"cpu"`
-		Mem struct {
-			Free  int64 `json:"free"`
-			Total int64 `json:"total"`
-			Used  int64 `json:"used"`
-		} `json:"memory"`
-		Swap struct {
-			Free  int64 `json:"free"`
-			Total int64 `json:"total"`
-			Used  int64 `json:"used"`
-		} `json:"swap"`
-		Disk struct {
-			Avail int64 `json:"avail"`
-			Total int64 `json:"total"`
-			Used  int64 `json:"used"`
-		} `json:"root"`
-		Load   []float64 `json:"loadavg"`
-		Uptime int64     `json:"uptime"`
-		Wait   float64   `json:"wait"`
-	} `json:"data"`
-}
-
-type Exporter struct {
-	ctx                 context.Context
-	endpoint            string
-	authorizationHeader string
-	client              *http.Client
-}
 
 func ReadSecretFile(secretfilename string) string {
 	// #nosec G703 -- path comes from operator-set *_FILE env vars (docker secrets), not untrusted input
 	file, err := os.Open(filepath.Clean(secretfilename))
 	// flag to check the file format
 	if err != nil {
-		log.Fatal(err)
+		fatal("unable to open secret file", "err", sanitize(err.Error()))
 	}
 	// Close the file
 	defer func() {
 		if err = file.Close(); err != nil {
-			log.Fatal(err)
+			fatal("unable to close secret file", "err", sanitize(err.Error()))
 		}
 	}()
 	// Read the first line
 	line := bufio.NewScanner(file)
 	line.Scan()
 	return line.Text()
-}
-
-func NewExporter(ctx context.Context, endpoint string, module *Module) *Exporter {
-	return &Exporter{
-		ctx:                 ctx,
-		endpoint:            endpoint,
-		authorizationHeader: module.authorizationHeader,
-		client:              module.client,
-	}
-}
-
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	ch <- up
-	ch <- version
-	ch <- available
-	ch <- size
-	ch <- used
-	ch <- snapshot_count
-	ch <- snapshot_vm_count
-	ch <- snapshot_vm_last_timestamp
-	ch <- snapshot_vm_last_verify
-	ch <- subscription_info
-	ch <- subscription_status
-	ch <- subscription_due_timestamp_seconds
-	ch <- host_cpu_usage
-	ch <- host_memory_free
-	ch <- host_memory_total
-	ch <- host_memory_used
-	ch <- host_swap_free
-	ch <- host_swap_total
-	ch <- host_swap_used
-	ch <- host_disk_available
-	ch <- host_disk_total
-	ch <- host_disk_used
-	ch <- host_uptime
-	ch <- host_io_wait
-	ch <- host_load1
-	ch <- host_load5
-	ch <- host_load15
-}
-
-func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	err := e.collectFromAPI(ch)
-	if err != nil {
-		ch <- prometheus.MustNewConstMetric(
-			up, prometheus.GaugeValue, 0,
-		)
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\n", ""), "\r", ""))
-		return
-	}
-	ch <- prometheus.MustNewConstMetric(
-		up, prometheus.GaugeValue, 1,
-	)
-
-}
-
-func (e *Exporter) collectFromAPI(ch chan<- prometheus.Metric) error {
-
-	// get version
-	err := e.getVersion(ch)
-	if err != nil {
-		return err
-	}
-
-	// get datastores
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreUsageApi, nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Request URL: %s", req.URL)
-		//		log.Printf("DEBUG: Request Header: %s", vmID)
-	}
-
-	// make request and show output
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	// check if status code is 200
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("ERROR: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-		//log.Printf("DEBUG: Response body: %s", string(body))
-	}
-
-	// parse json
-	var response DatastoreResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return err
-	}
-
-	// for each datastore collect metrics
-	for _, datastore := range response.Data {
-		err := e.getDatastoreMetric(datastore, ch)
-		if err != nil {
-			return err
-		}
-	}
-
-	// get node metrics
-	err = e.getNodeMetrics(ch)
-	if err != nil {
-		return err
-	}
-
-	// get node subscription metrics
-	err = e.getNodeSubscriptionMetrics(ch)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (e *Exporter) getVersion(ch chan<- prometheus.Metric) error {
-	// get version
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+versionApi, nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Request URL: %s", req.URL)
-		//		log.Printf("DEBUG: Request Header: %s", vmID)
-	}
-
-	// make request and show output
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-		//log.Printf("DEBUG: Response body: %s", string(body))
-	}
-
-	// check if status code is 200
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("ERROR: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	// parse json
-	var response VersionResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return err
-	}
-
-	ch <- prometheus.MustNewConstMetric(
-		version, prometheus.GaugeValue, 1, response.Data.Version, response.Data.Repoid, response.Data.Release,
-	)
-
-	return nil
-}
-
-func (e *Exporter) getNodeSubscriptionMetrics(ch chan<- prometheus.Metric) error {
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+nodeApi+"/localhost/subscription", nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Request URL: %s", req.URL)
-	}
-
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("ERROR: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	var raw struct {
-		Data map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return err
-	}
-
-	// default values
-	statusStr := ""
-	productName := "unknown"
-	dueTs := int64(0)
-
-	if v, ok := raw.Data["status"]; ok && v != nil {
-		statusStr = fmt.Sprintf("%v", v)
-	}
-	if v, ok := raw.Data["productname"]; ok && v != nil {
-		productName = fmt.Sprintf("%v", v)
-	}
-	if v, ok := raw.Data["nextduedate"]; ok && v != nil {
-		if s, ok := v.(string); ok {
-			t, err := time.Parse("2006-01-02", s)
-			if err == nil {
-				dueTs = t.Unix()
-			}
-		}
-	}
-
-	ch <- prometheus.MustNewConstMetric(
-		subscription_info, prometheus.GaugeValue, 1, productName, statusStr,
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		subscription_due_timestamp_seconds, prometheus.GaugeValue, float64(dueTs), productName,
-	)
-
-	// Emit a metric for each possible status with 1/0
-	statuses := []string{"new", "notfound", "active", "invalid", "expired", "suspended"}
-	for _, s := range statuses {
-		val := 0.0
-		if statusStr == s {
-			val = 1.0
-		}
-		ch <- prometheus.MustNewConstMetric(
-			subscription_status, prometheus.GaugeValue, val, s,
-		)
-	}
-
-	return nil
-}
-
-func (e *Exporter) getNodeMetrics(ch chan<- prometheus.Metric) error {
-	// NOTE: According to the api documentation, we have to provide the node name (won't work with the node ip),
-	// but it seems to work with any name, so we just use "localhost" here.
-	// see: https://pbs.proxmox.com/docs/api-viewer/index.html#/nodes/{node}
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+nodeApi+"/localhost/status", nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Request URL: %s", req.URL)
-		//log.Printf("DEBUG: Request Header: %s", vmID)
-	}
-
-	// make request and show output
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	// check if status code is 200
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("ERROR: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-		//log.Printf("DEBUG: Response body: %s", string(body))
-	}
-
-	// parse json
-	var response HostResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return err
-	}
-
-	// set host metrics
-	ch <- prometheus.MustNewConstMetric(
-		host_cpu_usage, prometheus.GaugeValue, float64(response.Data.CPU),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_memory_free, prometheus.GaugeValue, float64(response.Data.Mem.Free),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_memory_total, prometheus.GaugeValue, float64(response.Data.Mem.Total),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_memory_used, prometheus.GaugeValue, float64(response.Data.Mem.Used),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_swap_free, prometheus.GaugeValue, float64(response.Data.Swap.Free),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_swap_total, prometheus.GaugeValue, float64(response.Data.Swap.Total),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_swap_used, prometheus.GaugeValue, float64(response.Data.Swap.Used),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_disk_available, prometheus.GaugeValue, float64(response.Data.Disk.Avail),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_disk_total, prometheus.GaugeValue, float64(response.Data.Disk.Total),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_disk_used, prometheus.GaugeValue, float64(response.Data.Disk.Used),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_uptime, prometheus.GaugeValue, float64(response.Data.Uptime),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_io_wait, prometheus.GaugeValue, float64(response.Data.Wait),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_load1, prometheus.GaugeValue, float64(response.Data.Load[0]),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_load5, prometheus.GaugeValue, float64(response.Data.Load[1]),
-	)
-	ch <- prometheus.MustNewConstMetric(
-		host_load15, prometheus.GaugeValue, float64(response.Data.Load[2]),
-	)
-
-	return nil
-}
-
-func (e *Exporter) getDatastoreMetric(datastore Datastore, ch chan<- prometheus.Metric) error {
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: --Store %s", datastore.Store)
-		log.Printf("DEBUG: --Avail %d", datastore.Avail)
-		log.Printf("DEBUG: --Total %d", datastore.Total)
-		log.Printf("DEBUG: --Used %d", datastore.Used)
-	}
-
-	// set datastore metrics
-	ch <- prometheus.MustNewConstMetric(
-		available, prometheus.GaugeValue, float64(datastore.Avail), datastore.Store,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		size, prometheus.GaugeValue, float64(datastore.Total), datastore.Store,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		used, prometheus.GaugeValue, float64(datastore.Used), datastore.Store,
-	)
-
-	// get namespaces of datastore
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreApi+"/"+datastore.Store+"/namespace", nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: --Request URL: %s", req.URL)
-		//log.Printf("DEBUG: --Request Header: %s", vmID)
-	}
-
-	// make request and show output
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	// check if status code is 200
-	if resp.StatusCode != 200 {
-		if resp.StatusCode == 400 {
-			// check if datastore is being deleted
-			isBeingDeleted, err := regexp.MatchString("(?i)datastore is being deleted", string(body[:]))
-			if err != nil {
-				return err
-			}
-			if isBeingDeleted {
-				log.Printf("INFO: Datastore: %s is being deleted, Skip scrape datastore metric", datastore.Store)
-				return nil
-			}
-			isMaintenance, err := regexp.MatchString("(?i)offline maintenance mode", string(body[:]))
-			if err != nil {
-				return err
-			}
-			if isMaintenance {
-				log.Printf("INFO: Datastore: %s is in maintenance mode, Skip scrape datastore metric", datastore.Store)
-				return nil
-			}
-			isUnmounted, err := regexp.MatchString("(?i)is not mounted", string(body[:]))
-			if err != nil {
-				return err
-			}
-			if isUnmounted {
-				log.Printf("INFO: Datastore: %s is unmounted, Skip scrape datastore metric", datastore.Store)
-				return nil
-			}
-		}
-		return fmt.Errorf("ERROR: --Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: --Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-		//log.Printf("DEBUG: Response body: %s", string(body))
-	}
-
-	// parse json
-	var response NamespaceResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return err
-	}
-
-	// for each namespace collect metrics
-	for _, namespace := range response.Data {
-		err := e.getNamespaceMetric(datastore.Store, namespace.Namespace, ch)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (e *Exporter) getNamespaceMetric(datastore string, namespace string, ch chan<- prometheus.Metric) error {
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: ----Namespace %s", namespace)
-	}
-
-	// get snapshots of datastore
-	req, err := http.NewRequestWithContext(e.ctx, "GET", e.endpoint+datastoreApi+"/"+datastore+"/snapshots?ns="+namespace, nil)
-	if err != nil {
-		return err
-	}
-
-	// add Authorization header
-	req.Header.Set("Authorization", e.authorizationHeader)
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: ----Request URL: %s", req.URL)
-		//log.Printf("DEBUG: ----Request Header: %s", vmID)
-	}
-
-	// make request and show output
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err := resp.Body.Close(); err != nil {
-		log.Printf("Error closing response body: %v", err)
-	}
-	if err != nil {
-		return err
-	}
-
-	// check if status code is 200
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("ERROR: ----Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-	}
-
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: ----Status code %d returned from endpoint: %s", resp.StatusCode, e.endpoint)
-		//log.Printf("DEBUG: Response body: %s", string(body))
-	}
-
-	// parse json
-	var response SnapshotResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return err
-	}
-
-	// set total snapshot metrics
-	ch <- prometheus.MustNewConstMetric(
-		snapshot_count, prometheus.GaugeValue, float64(len(response.Data)), datastore, namespace,
-	)
-
-	// set snapshot metrics per vm
-	vmNameMapping := make(map[string]string)
-	vmCount := make(map[string]int)
-	for _, snapshot := range response.Data {
-		// get vm name from snapshot
-		vmID := snapshot.BackupID
-		vmNameMapping[vmID] = snapshot.VMName
-		vmCount[vmID]++
-	}
-
-	// set snapshot metrics per vm
-	for vmID, count := range vmCount {
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_count, prometheus.GaugeValue, float64(count), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-
-		// find last snapshot with backupID
-		lastTimeStamp, lastVerify, err := findLastSnapshotWithBackupID(response, vmID)
-		if err != nil {
-			return err
-		}
-		lastVerifyBool := 0
-		if lastVerify == "ok" {
-			lastVerifyBool = 1
-		}
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_last_timestamp, prometheus.GaugeValue, float64(lastTimeStamp), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_last_verify, prometheus.GaugeValue, float64(lastVerifyBool), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-	}
-
-	return nil
-}
-
-func findLastSnapshotWithBackupID(response SnapshotResponse, backupID string) (int64, string, error) {
-	// find biggest value of backupTime of backupID in response array
-	var lastTimeStamp int64
-	var lastVerify string
-	for _, snapshot := range response.Data {
-		if snapshot.BackupID == backupID {
-			if snapshot.BackupTime > lastTimeStamp {
-				lastTimeStamp = snapshot.BackupTime
-				lastVerify = snapshot.Verification.State
-			}
-		}
-	}
-
-	// if lastTimeStamp is still 0, no snapshot was found
-	if lastTimeStamp != 0 {
-		return lastTimeStamp, lastVerify, nil
-	}
-
-	return 0, "", fmt.Errorf("ERROR: No snapshot found with backupID %s", backupID)
 }
 
 // applyEnv applies the environment variables, which overwrite defaults or flags.
@@ -893,6 +88,12 @@ func applyEnv() {
 	}
 	if os.Getenv("PBS_LISTEN_ADDRESS") != "" {
 		*listenAddress = os.Getenv("PBS_LISTEN_ADDRESS")
+	}
+	if os.Getenv("PBS_SCRAPE_TIMEOUT") != "" {
+		*scrapeTimeout = os.Getenv("PBS_SCRAPE_TIMEOUT")
+	}
+	if os.Getenv("PBS_SCRAPE_TIMEOUT_OFFSET") != "" {
+		*scrapeTimeoutOffset = os.Getenv("PBS_SCRAPE_TIMEOUT_OFFSET")
 	}
 }
 
@@ -929,6 +130,66 @@ func readConnectionEnv() {
 	if os.Getenv("PBS_INSECURE") != "" {
 		*insecure = os.Getenv("PBS_INSECURE")
 	}
+	if os.Getenv("PBS_MAX_CONCURRENCY") != "" {
+		*maxConcurrency = os.Getenv("PBS_MAX_CONCURRENCY")
+	}
+	if os.Getenv("PBS_COLLECTORS") != "" {
+		*collectorList = os.Getenv("PBS_COLLECTORS")
+	}
+}
+
+// parseScrapeTimeouts parses the scrape timeout flags.
+func parseScrapeTimeouts() (scrapeTimeouts, error) {
+	fallback, err := time.ParseDuration(*scrapeTimeout)
+	if err != nil {
+		return scrapeTimeouts{}, fmt.Errorf("unable to parse scrape timeout: %w", err)
+	}
+	if fallback <= 0 {
+		return scrapeTimeouts{}, fmt.Errorf("scrape timeout must be greater than 0")
+	}
+	offset, err := time.ParseDuration(*scrapeTimeoutOffset)
+	if err != nil {
+		return scrapeTimeouts{}, fmt.Errorf("unable to parse scrape timeout offset: %w", err)
+	}
+	if offset < 0 {
+		return scrapeTimeouts{}, fmt.Errorf("scrape timeout offset must not be negative")
+	}
+	return scrapeTimeouts{fallback: fallback, offset: offset}, nil
+}
+
+// legacyModule builds the "default" module from the flags/environment
+// variables, used without a config file.
+func legacyModule() (map[string]*Module, error) {
+	insecureBool, err := strconv.ParseBool(*insecure)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse insecure: %w", err)
+	}
+	timeoutDuration, err := time.ParseDuration(*timeout)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse timeout: %w", err)
+	}
+	concurrency, err := strconv.Atoi(*maxConcurrency)
+	if err != nil || concurrency <= 0 {
+		return nil, fmt.Errorf("max concurrency must be a number greater than 0")
+	}
+	collectors, err := parseCollectorList(*collectorList)
+	if err != nil {
+		return nil, fmt.Errorf("collectors: %w", err)
+	}
+
+	slog.Debug("legacy module",
+		"endpoint", sanitize(*endpoint), "username", sanitize(*username), "token_name", sanitize(*apitokenname),
+		"timeout", timeoutDuration, "insecure", insecureBool, "max_concurrency", concurrency)
+
+	return BuildModules(nil, &ModuleConfig{
+		User:           *username,
+		TokenName:      *apitokenname,
+		TokenValue:     *apitoken,
+		Endpoint:       *endpoint,
+		Insecure:       insecureBool,
+		MaxConcurrency: concurrency,
+		Collectors:     collectors,
+	}, timeoutDuration)
 }
 
 func main() {
@@ -939,84 +200,55 @@ func main() {
 		os.Exit(0)
 	}
 
-	// log build information
-	log.Printf("INFO: Starting PBS Exporter %s, commit %s, built at %s", Version, Commit, BuildTime)
-
 	// if env variable is set, it will overwrite defaults or flags
 	applyEnv()
+	setupLogging(*loglevel)
+
+	slog.Info("starting PBS Exporter", "version", Version, "commit", Commit, "build_time", BuildTime)
+
+	timeouts, err := parseScrapeTimeouts()
+	if err != nil {
+		fatal(sanitize(err.Error()))
+	}
 
 	var modules map[string]*Module
 	if *configFile != "" {
 		// modules: named credential sets from the config file
 		cfg, m, err := LoadModules(*configFile)
 		if err != nil {
-			log.Fatalf("ERROR: %s", err)
+			fatal("unable to load config file", "err", sanitize(err.Error()))
 		}
 		modules = m
 
-		// debug
-		if *loglevel == "debug" {
-			log.Printf("DEBUG: Using config file: %s", strings.ReplaceAll(strings.ReplaceAll(*configFile, "\n", ""), "\r", ""))
-			for _, name := range moduleNames(modules) {
-				mc := cfg[name]
-				log.Printf("DEBUG: Module %s: user %s, token name %s, endpoint %s, timeout %s, insecure %t",
-					strings.ReplaceAll(strings.ReplaceAll(name, "\n", ""), "\r", ""),
-					mc.User, mc.TokenName, mc.Endpoint, modules[name].client.Timeout, mc.Insecure)
+		slog.Debug("using config file", "path", sanitize(*configFile))
+		for _, name := range moduleNames(modules) {
+			mc := cfg[name]
+			mod := modules[name]
+			var collectors []string
+			for _, c := range mod.collectors {
+				collectors = append(collectors, c.name)
 			}
+			slog.Debug("module",
+				"name", sanitize(name), "user", sanitize(mc.User), "token_name", sanitize(mc.TokenName),
+				"endpoint", sanitize(mc.Endpoint), "timeout", mod.client.Timeout, "insecure", mc.Insecure,
+				"max_concurrency", mod.maxConcurrency, "collectors", strings.Join(collectors, ","))
 		}
+		slog.Info("modules loaded", "modules", sanitize(strings.Join(moduleNames(modules), ", ")))
 	} else {
-		// convert flags
-		insecureBool, err := strconv.ParseBool(*insecure)
+		modules, err = legacyModule()
 		if err != nil {
-			log.Fatalf("ERROR: Unable to parse insecure: %s", err)
+			fatal(sanitize(err.Error()))
 		}
-
-		// set timeout
-		timeoutDuration, err := time.ParseDuration(*timeout)
-		if err != nil {
-			log.Fatalf("ERROR: Unable to parse timeout: %s", err)
-		}
-
-		// the flags/environment variables define the "default" module
-		modules, err = BuildModules(nil, &ModuleConfig{
-			User:       *username,
-			TokenName:  *apitokenname,
-			TokenValue: *apitoken,
-			Endpoint:   *endpoint,
-			Insecure:   insecureBool,
-		}, timeoutDuration)
-		if err != nil {
-			log.Fatalf("ERROR: %s", err)
-		}
-
-		// debug
-		if *loglevel == "debug" {
-			log.Printf("DEBUG: Using connection endpoint: %s", *endpoint)
-			log.Printf("DEBUG: Using connection username: %s", *username)
-			log.Printf("DEBUG: Using connection apitokenname: %s", *apitokenname)
-			log.Printf("DEBUG: Using connection timeout: %s", timeoutDuration)
-			log.Printf("DEBUG: Using connection insecure: %t", insecureBool)
-		}
-
 		if *endpoint != "" {
-			log.Printf("INFO: Using fix connection endpoint: %s", *endpoint)
+			slog.Info("using fixed connection endpoint", "endpoint", sanitize(*endpoint))
 		}
 	}
 
-	// debug
-	if *loglevel == "debug" {
-		log.Printf("DEBUG: Using metrics path: %s", *metricsPath)
-		log.Printf("DEBUG: Using listen address: %s", *listenAddress)
-	}
-
-	if *configFile != "" {
-		log.Printf("INFO: Modules: %s", strings.ReplaceAll(strings.ReplaceAll(strings.Join(moduleNames(modules), ", "), "\n", ""), "\r", ""))
-	}
-	log.Printf("INFO: Listening on: %s", *listenAddress)
-	log.Printf("INFO: Metrics path: %s", *metricsPath)
+	slog.Info("listening", "address", sanitize(*listenAddress), "metrics_path", sanitize(*metricsPath),
+		"scrape_timeout", timeouts.fallback, "scrape_timeout_offset", timeouts.offset)
 
 	// start http server
-	http.Handle(*metricsPath, newMetricsHandler(modules, *loglevel == "debug", *configFile != ""))
+	http.Handle(*metricsPath, newMetricsHandler(modules, *configFile != "", timeouts))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte(`<html>
@@ -1027,15 +259,18 @@ func main() {
 			</body>
 			</html>`))
 		if err != nil {
-			log.Printf("ERROR: Failed to write response: %s", err)
+			slog.Error("failed to write response", "err", sanitize(err.Error()))
 		}
 	})
 
+	// no WriteTimeout: a scrape may take as long as Prometheus allows (see
+	// scrapeTimeouts), the scrape deadline bounds the work instead
 	server := &http.Server{
-		Addr:         *listenAddress,
-		Handler:      nil,
-		ReadTimeout:  time.Second * 10,
-		WriteTimeout: time.Second * 10,
+		Addr:              *listenAddress,
+		Handler:           nil,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
-	log.Fatal(server.ListenAndServe())
+	fatal("server stopped", "err", sanitize(server.ListenAndServe().Error()))
 }

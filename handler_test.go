@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,44 +12,6 @@ import (
 	"testing"
 	"time"
 )
-
-// fakePBS answers the PBS API calls the exporter makes. It reports the given
-// version and records the Authorization headers it received.
-func fakePBS(t *testing.T, version string) (*httptest.Server, func() []string) {
-	t.Helper()
-	var mu sync.Mutex
-	var auths []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		auths = append(auths, r.Header.Get("Authorization"))
-		mu.Unlock()
-		// slow answers make concurrent scrapes overlap
-		time.Sleep(20 * time.Millisecond)
-		p := r.URL.Path
-		switch {
-		case strings.HasSuffix(p, "/version"):
-			_, _ = fmt.Fprintf(w, `{"data":{"version":%q,"release":"1","repoid":"abc"}}`, version)
-		case strings.HasSuffix(p, "/datastore-usage"):
-			_, _ = fmt.Fprint(w, `{"data":[{"store":"ds1","avail":1,"total":3,"used":2}]}`)
-		case strings.HasSuffix(p, "/namespace"):
-			_, _ = fmt.Fprint(w, `{"data":[{"ns":""}]}`)
-		case strings.HasSuffix(p, "/snapshots"):
-			_, _ = fmt.Fprint(w, `{"data":[{"backup-id":"100","backup-time":1700000000,"comment":"vm100"}]}`)
-		case strings.HasSuffix(p, "/subscription"):
-			_, _ = fmt.Fprint(w, `{"data":{"status":"active","productname":"PBS","nextduedate":"2030-01-01"}}`)
-		case strings.HasSuffix(p, "/status"):
-			_, _ = fmt.Fprint(w, `{"data":{"cpu":0.1,"loadavg":[1,2,3],"uptime":10,"wait":0,"memory":{},"swap":{},"root":{}}}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv, func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), auths...)
-	}
-}
 
 // scrape is also called from goroutines, so it must not call t.Fatal.
 func scrape(t *testing.T, h http.Handler, query string) (int, string) {
@@ -84,7 +45,7 @@ func TestModulesUseTheirOwnCredentials(t *testing.T) {
 	h := newMetricsHandler(testModules(t, Config{
 		"site-a": {User: "root@pam", TokenName: "ta", TokenValue: "sa", Endpoint: srvA.URL},
 		"site-b": {User: "mon@pbs", TokenName: "tb", TokenValue: "sb", Endpoint: srvB.URL},
-	}, nil), false, true)
+	}, nil), true, testTimeouts)
 
 	for _, tc := range []struct {
 		module, version string
@@ -117,7 +78,7 @@ func TestModulesUseTheirOwnCredentials(t *testing.T) {
 }
 
 func TestUnknownModule(t *testing.T) {
-	h := newMetricsHandler(testModules(t, Config{"a": {User: "u", TokenName: "n", TokenValue: "v", Endpoint: "http://127.0.0.1:1"}}, nil), false, true)
+	h := newMetricsHandler(testModules(t, Config{"a": {User: "u", TokenName: "n", TokenValue: "v", Endpoint: "http://127.0.0.1:1"}}, nil), true, testTimeouts)
 	code, _ := scrape(t, h, "module=nope")
 	if code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", code)
@@ -130,7 +91,7 @@ func TestUnknownModule(t *testing.T) {
 
 func TestLegacyDefaultModule(t *testing.T) {
 	srv, auths := fakePBS(t, "3.3.3")
-	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "root@pam", TokenName: "pbs-exporter", TokenValue: "s"}), false, false)
+	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "root@pam", TokenName: "pbs-exporter", TokenValue: "s"}), false, testTimeouts)
 	// no module parameter -> "default" built from flags/env, target from URL
 	code, body := scrape(t, h, "target="+srv.URL)
 	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 1\n") {
@@ -181,7 +142,7 @@ func TestConfigModulesRequireEndpoint(t *testing.T) {
 
 	pinned, _ := fakePBS(t, "4.4.4")
 	other, otherAuths := fakePBS(t, "8.8.8")
-	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "SECRET", Endpoint: pinned.URL}}, nil), false, true)
+	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "SECRET", Endpoint: pinned.URL}}, nil), true, testTimeouts)
 	for _, target := range []string{other.URL, "ftp://127.0.0.1:1", "http://127.0.0.1:1%0aINFO:%20forged"} {
 		code, body := scrape(t, file, "module=site&target="+target)
 		if code != http.StatusOK || !strings.Contains(body, `version="4.4.4"`) {
@@ -192,7 +153,7 @@ func TestConfigModulesRequireEndpoint(t *testing.T) {
 		t.Errorf("token was sent to the target parameter: %v", got)
 	}
 
-	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v"}), false, false)
+	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v"}), false, testTimeouts)
 	if code, _ := scrape(t, legacy, "target=http://127.0.0.1:1/api2"); code != http.StatusOK {
 		t.Errorf("legacy target: status = %d, want 200", code)
 	}
@@ -223,7 +184,7 @@ func TestScrapeCancelStopsUpstream(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	t.Cleanup(srv.Close)
-	h := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL, Timeout: "1m"}}, nil), false, true)
+	h := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL, Timeout: "1m"}}, nil), true, testTimeouts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -242,7 +203,7 @@ func TestModuleEndpointIsPinned(t *testing.T) {
 	other, otherAuths := fakePBS(t, "0.0.0")
 	h := newMetricsHandler(testModules(t, Config{
 		"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL},
-	}, nil), false, true)
+	}, nil), true, testTimeouts)
 	_, body := scrape(t, h, "module=site&target="+other.URL)
 	if !strings.Contains(body, `version="9.9.9"`) {
 		t.Errorf("expected the pinned PBS to be scraped, got:\n%s", body)
@@ -259,7 +220,7 @@ func TestConcurrentScrapes(t *testing.T) {
 	h := newMetricsHandler(testModules(t, Config{
 		"a": {User: "u@pbs", TokenName: "n", TokenValue: "a", Endpoint: srvA.URL},
 		"b": {User: "u@pbs", TokenName: "n", TokenValue: "b", Endpoint: srvB.URL},
-	}, nil), false, true)
+	}, nil), true, testTimeouts)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -372,7 +333,7 @@ func TestLoadConfigRejectsControlCharsInPath(t *testing.T) {
 // saveFlags restores the flag values applyEnv may change after the test.
 func saveFlags(t *testing.T) {
 	t.Helper()
-	ptrs := []*string{configFile, loglevel, endpoint, username, apitokenname, apitoken, timeout, insecure, metricsPath, listenAddress}
+	ptrs := []*string{configFile, loglevel, endpoint, username, apitokenname, apitoken, timeout, insecure, maxConcurrency, collectorList, metricsPath, listenAddress, scrapeTimeout, scrapeTimeoutOffset}
 	saved := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		saved[i] = *p
@@ -443,7 +404,7 @@ func TestApplyEnvLegacyMode(t *testing.T) {
 func TestLegacyModeUnchanged(t *testing.T) {
 	pinned, pinnedAuths := fakePBS(t, "5.5.5")
 	other, otherAuths := fakePBS(t, "6.6.6")
-	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "root@pam", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL}), false, false)
+	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "root@pam", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL}), false, testTimeouts)
 
 	code, body := scrape(t, h, "module=foo&target="+other.URL)
 	if code != http.StatusOK || !strings.Contains(body, `version="5.5.5"`) {
@@ -480,7 +441,7 @@ func TestRedirects(t *testing.T) {
 	other, otherAuths := fakePBS(t, "7.7.7")
 	pinned := redirector(t, other.URL)
 
-	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "SECRET", Endpoint: pinned.URL}}, nil), false, true)
+	file := newMetricsHandler(testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "SECRET", Endpoint: pinned.URL}}, nil), true, testTimeouts)
 	_, body := scrape(t, file, "module=site")
 	if !strings.Contains(body, "\npbs_up 0\n") {
 		t.Errorf("expected pbs_up 0 for a redirect, got:\n%s", body)
@@ -489,7 +450,7 @@ func TestRedirects(t *testing.T) {
 		t.Fatalf("token was forwarded to the redirect target: %v", got)
 	}
 
-	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL}), false, false)
+	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL}), false, testTimeouts)
 	if _, body := scrape(t, legacy, ""); !strings.Contains(body, `version="7.7.7"`) {
 		t.Errorf("legacy module must still follow redirects, got:\n%s", body)
 	}

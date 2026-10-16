@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "store": "store1",
+      "avail": 1000,
+      "total": 3000,
+      "used": 2000,
+      "mount-status": "nonremovable",
+      "backend-type": "filesystem"
+    }
+  ]
+}

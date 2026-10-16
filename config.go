@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+	"golang.org/x/sync/semaphore"
 )
 
 const defaultModuleName = "default"
@@ -21,6 +22,10 @@ const defaultModuleName = "default"
 // defaultModuleTimeout is the timeout of a config file module that sets none.
 // The config file does not inherit pbs.timeout / PBS_TIMEOUT.
 const defaultModuleTimeout = 5 * time.Second
+
+// defaultMaxConcurrency is the number of concurrent requests to one PBS of a
+// module that sets none.
+const defaultMaxConcurrency = 4
 
 // ModuleConfig holds the credentials and connection settings used to talk to a
 // Proxmox Backup Server. A module is selected per scrape with the "module" URL
@@ -40,6 +45,12 @@ type ModuleConfig struct {
 	Insecure bool `yaml:"insecure"`
 	// Timeout of requests to PBS (Go duration), defaults to defaultModuleTimeout.
 	Timeout string `yaml:"timeout"`
+	// MaxConcurrency limits the concurrent requests to the PBS, defaults to
+	// defaultMaxConcurrency.
+	MaxConcurrency int `yaml:"max_concurrency"`
+	// Collectors enables (true) or disables (false) collectors; collectors
+	// that are not listed keep their default.
+	Collectors map[string]bool `yaml:"collectors"`
 }
 
 // Module is a validated ModuleConfig with a dedicated HTTP client, so that
@@ -49,6 +60,10 @@ type Module struct {
 	endpoint            string
 	authorizationHeader string
 	client              *http.Client
+	maxConcurrency      int
+	// sem limits the concurrent requests of all scrapes of the module.
+	sem        *semaphore.Weighted
+	collectors []*collector
 }
 
 // Config is the content of the config file: module name -> module settings.
@@ -126,6 +141,12 @@ func ParseConfig(data []byte) (Config, error) {
 			} else if d <= 0 {
 				invalid = append(invalid, fmt.Sprintf("  - %s: timeout must be greater than 0", name))
 			}
+		}
+		if m.MaxConcurrency < 0 {
+			invalid = append(invalid, fmt.Sprintf("  - %s: max_concurrency must be greater than 0", name))
+		}
+		if err := validateCollectors(m.Collectors); err != nil {
+			invalid = append(invalid, fmt.Sprintf("  - %s: collectors: %s", name, err))
 		}
 		cfg[name] = m
 	}
@@ -212,18 +233,35 @@ func NewModule(name string, cfg ModuleConfig, defaultTimeout time.Duration) (*Mo
 		}
 		timeout = d
 	}
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			// #nosec G402 -- opt-in per module, mirrors the existing PBS_INSECURE option
-			InsecureSkipVerify: cfg.Insecure,
-		},
+	maxConcurrency := defaultMaxConcurrency
+	if cfg.MaxConcurrency < 0 {
+		return nil, fmt.Errorf("module %q: max_concurrency must be greater than 0", name)
+	} else if cfg.MaxConcurrency > 0 {
+		maxConcurrency = cfg.MaxConcurrency
 	}
+	if err := validateCollectors(cfg.Collectors); err != nil {
+		return nil, fmt.Errorf("module %q: collectors: %w", name, err)
+	}
+	// the default transport brings dial, TLS handshake and idle timeouts
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// no proxy from the environment, as before
+	tr.Proxy = nil
+	// HTTP/1.1 as before: a custom TLS config disabled HTTP/2
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		// #nosec G402 -- opt-in per module, mirrors the existing PBS_INSECURE option
+		InsecureSkipVerify: cfg.Insecure,
+	}
+	tr.MaxIdleConnsPerHost = maxConcurrency
 	return &Module{
 		name:                name,
 		endpoint:            cfg.Endpoint,
 		authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
 		client:              &http.Client{Transport: tr, Timeout: timeout},
+		maxConcurrency:      maxConcurrency,
+		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
+		collectors:          enabledCollectors(cfg.Collectors),
 	}, nil
 }
 

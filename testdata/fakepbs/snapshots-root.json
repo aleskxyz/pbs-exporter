@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "backup-type": "vm",
+      "backup-id": "100",
+      "backup-time": 1700000000,
+      "comment": "web",
+      "owner": "pve@pbs!backup",
+      "size": 1024,
+      "verification": {"state": "ok", "upid": "UPID:pbs:00001000:00002000:00000001:6553F200:verify:store1\\x3avm\\x2f100:root@pam:"}
+    },
+    {
+      "backup-type": "vm",
+      "backup-id": "100",
+      "backup-time": 1700086400,
+      "comment": "web",
+      "owner": "pve@pbs!backup",
+      "size": 2048
+    },
+    {
+      "backup-type": "ct",
+      "backup-id": "101",
+      "backup-time": 1700000000,
+      "comment": "db",
+      "owner": "pve@pbs!backup",
+      "size": 512,
+      "verification": {"state": "ok", "upid": "UPID:pbs:00001000:00002000:00000002:6553F200:verify:store1\\x3act\\x2f101:root@pam:"}
+    }
+  ]
+}

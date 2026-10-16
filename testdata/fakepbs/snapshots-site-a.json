@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "backup-type": "vm",
+      "backup-id": "200",
+      "backup-time": 1700000000,
+      "comment": "app",
+      "owner": "site-a@pbs",
+      "size": 4096,
+      "verification": {"state": "failed", "upid": "UPID:pbs:00001000:00002000:00000003:6553F200:verify:store1\\x3asite-a\\x3avm\\x2f200:root@pam:"}
+    }
+  ]
+}

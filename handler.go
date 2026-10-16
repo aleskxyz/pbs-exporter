@@ -1,10 +1,12 @@
 package main
 
 import (
-	"log"
+	"log/slog"
+	"math"
 	"net/http"
 	"sort"
-	"strings"
+	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -19,6 +21,35 @@ func moduleNames(modules map[string]*Module) []string {
 	return names
 }
 
+// scrapeTimeouts bound the time of a scrape.
+type scrapeTimeouts struct {
+	// fallback is used when the client sends no scrape timeout.
+	fallback time.Duration
+	// offset is subtracted from the scrape timeout sent by Prometheus, so
+	// the response arrives before Prometheus gives up.
+	offset time.Duration
+}
+
+// scrapeTimeout returns how long a scrape may collect: the timeout Prometheus
+// sends in X-Prometheus-Scrape-Timeout-Seconds minus the offset, or the
+// fallback without the header.
+func (t scrapeTimeouts) scrapeTimeout(r *http.Request) time.Duration {
+	v := r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds")
+	if v == "" {
+		return t.fallback
+	}
+	secs, err := strconv.ParseFloat(v, 64)
+	// also refuses values that do not fit into a time.Duration
+	if err != nil || !(secs > 0 && secs < math.MaxInt64/float64(time.Second)) {
+		return t.fallback
+	}
+	d := time.Duration(secs * float64(time.Second))
+	if d > t.offset {
+		d -= t.offset
+	}
+	return d
+}
+
 // newMetricsHandler returns the /metrics handler. With a config file
 // (configMode), each request selects a module with the "module" URL parameter
 // (default "default") and scrapes the module's endpoint. Without one, the
@@ -28,7 +59,7 @@ func moduleNames(modules map[string]*Module) []string {
 //
 // Every request gets its own registry, so concurrent scrapes of different
 // targets can not see each other's metrics.
-func newMetricsHandler(modules map[string]*Module, debug bool, configMode bool) http.Handler {
+func newMetricsHandler(modules map[string]*Module, configMode bool, timeouts scrapeTimeouts) http.Handler {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		moduleName := defaultModuleName
 		if configMode && r.URL.Query().Get("module") != "" {
@@ -52,17 +83,12 @@ func newMetricsHandler(modules map[string]*Module, debug bool, configMode bool) 
 			}
 		}
 
-		if debug && configMode {
-			log.Printf("DEBUG: Using module %s, connection endpoint %s",
-				strings.ReplaceAll(strings.ReplaceAll(moduleName, "\n", ""), "\r", ""),
-				strings.ReplaceAll(strings.ReplaceAll(target, "\n", ""), "\r", ""))
-		} else if debug {
-			log.Printf("DEBUG: Using connection endpoint %s", strings.ReplaceAll(strings.ReplaceAll(target, "\n", ""), "\r", ""))
-		}
+		timeout := timeouts.scrapeTimeout(r)
+		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(target), "timeout", timeout)
 
 		reg := prometheus.NewRegistry()
-		if err := reg.Register(NewExporter(r.Context(), target, module)); err != nil {
-			log.Printf("ERROR: %s", err)
+		if err := reg.Register(NewExporter(r.Context(), target, module, timeout)); err != nil {
+			slog.Error("registering the exporter", "err", sanitize(err.Error()))
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
