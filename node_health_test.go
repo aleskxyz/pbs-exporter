@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"math/rand/v2"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestZFSMetrics(t *testing.T) {
 	srv := newFakePBS(t, nil)
 	e := testExporter(t, srv, ModuleConfig{})
 	compare(t, e, `
-# HELP pbs_zfs_pool_healthy Whether the ZFS pool is ONLINE; health is the state PBS reports.
+# HELP pbs_zfs_pool_healthy Whether the ZFS pool is ONLINE; health is the state PBS reports. PBS does not list pools it can not read the usage of (e.g. FAULTED or UNAVAIL), so watch for pools that disappear.
 # TYPE pbs_zfs_pool_healthy gauge
 pbs_zfs_pool_healthy{health="DEGRADED",pool="backup-pool"} 0
 pbs_zfs_pool_healthy{health="ONLINE",pool="rpool"} 1
@@ -45,9 +50,10 @@ func TestNodeTimeOffset(t *testing.T) {
 	})
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
 	got := gaugeValue(t, e, "pbs_node_time_offset_seconds")
-	// "time" has whole seconds, and the answer is written about 400ms after
-	// the request arrived, with the midpoint 200ms after it was sent
-	if got < 598 || got > 601.5 {
+	// "time" has whole seconds (taken at the start of the test, then +0.5s
+	// as the expected middle of that second), the midpoint of the round trip
+	// is 200ms after the request was sent
+	if got < 599.2 || got > 600.4 {
 		t.Errorf("offset = %.3fs, want about 600s", got)
 	}
 }
@@ -75,4 +81,39 @@ func gaugeValue(t *testing.T, c prometheus.Collector, name string) float64 {
 	}
 	t.Fatalf("%s not found in %s", name, strings.Join(names, ", "))
 	return 0
+}
+
+// A node whose clock is in sync reports an offset of about 0 on average,
+// although PBS cuts the time to whole seconds.
+func TestNodeTimeOffsetUnbiased(t *testing.T) {
+	srv := &fakeServer{}
+	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/localhost/time" {
+			http.NotFound(w, r)
+			return
+		}
+		// spread the requests over the second
+		time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
+		_, _ = fmt.Fprintf(w, `{"data":{"time":%d}}`, time.Now().Unix())
+	}))
+	t.Cleanup(srv.Close)
+	m := testModule(t, srv, ModuleConfig{})
+	var sum float64
+	const n = 40
+	for range n {
+		s := &scrapeState{api: NewExporter(context.Background(), srv.URL, m, 5*time.Second).api, module: m}
+		ch := make(chan prometheus.Metric, 1)
+		if err := timeCollector.collect(context.Background(), s, ch); err != nil {
+			t.Fatal(err)
+		}
+		var pb dto.Metric
+		if err := (<-ch).Write(&pb); err != nil {
+			t.Fatal(err)
+		}
+		sum += pb.GetGauge().GetValue()
+		time.Sleep(time.Duration(rand.IntN(40)) * time.Millisecond)
+	}
+	if mean := sum / n; mean < -0.25 || mean > 0.25 {
+		t.Errorf("mean offset of an in-sync clock = %.3fs, want about 0", mean)
+	}
 }

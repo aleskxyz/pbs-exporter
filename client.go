@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -96,8 +98,31 @@ func (c *apiClient) get(ctx context.Context, path string, q url.Values, out any)
 	return err
 }
 
+// requestTimes records when a request was written and when the first byte
+// of the answer arrived; the hooks run in the transport's goroutines.
+type requestTimes struct {
+	mu               sync.Mutex
+	wrote, firstByte time.Time
+}
+
+func (rt *requestTimes) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			rt.mu.Lock()
+			rt.wrote = time.Now()
+			rt.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			rt.mu.Lock()
+			rt.firstByte = time.Now()
+			rt.mu.Unlock()
+		},
+	}
+}
+
 // getTimed is get that also returns when the request was sent and when the
-// answer arrived (waiting for a free request slot does not count).
+// answer arrived. Neither waiting for a free request slot nor connecting
+// (DNS, TCP, TLS handshake) counts.
 func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out any) (sent, received time.Time, err error) {
 	if err := c.sem.Acquire(ctx, 1); err != nil {
 		return sent, received, fmt.Errorf("%s: %w", path, err)
@@ -108,7 +133,8 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var times requestTimes
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, times.trace()), http.MethodGet, u, nil)
 	if err != nil {
 		return sent, received, fmt.Errorf("%s: %w", path, err)
 	}
@@ -121,6 +147,11 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 	if err != nil {
 		return sent, received, fmt.Errorf("%s: %w", path, err)
 	}
+	times.mu.Lock()
+	if !times.wrote.IsZero() && !times.firstByte.Before(times.wrote) {
+		sent, received = times.wrote, times.firstByte
+	}
+	times.mu.Unlock()
 	defer func() {
 		// read what is left, so the connection can be reused
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))

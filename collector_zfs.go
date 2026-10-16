@@ -9,7 +9,7 @@ import (
 var (
 	zfsPoolHealthy = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "zfs_pool", "healthy"),
-		"Whether the ZFS pool is ONLINE; health is the state PBS reports.",
+		"Whether the ZFS pool is ONLINE; health is the state PBS reports. PBS does not list pools it can not read the usage of (e.g. FAULTED or UNAVAIL), so watch for pools that disappear.",
 		[]string{"pool", "health"}, nil,
 	)
 	zfsPoolSize = prometheus.NewDesc(
@@ -41,7 +41,7 @@ type zfsPool struct {
 var zfsCollector = &collector{
 	name:      "zfs",
 	enabled:   true,
-	privilege: "Sys.Audit on /system",
+	privilege: "Sys.Audit on /system/disks",
 	descs:     []*prometheus.Desc{zfsPoolHealthy, zfsPoolSize, zfsPoolAllocated, zfsPoolFragmentation},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		var pools []zfsPool
