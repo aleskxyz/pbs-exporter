@@ -28,9 +28,13 @@ type snapshotItem struct {
 	Comment    string `json:"comment"`
 	// Size is not set while the snapshot has no manifest: the backup is
 	// still running (or the manifest is not readable).
-	Size         *int64 `json:"size"`
+	Size      *int64 `json:"size"`
+	Protected bool   `json:"protected"`
+	// Fingerprint of the encryption key, only set for encrypted snapshots.
+	Fingerprint  string `json:"fingerprint"`
 	Verification struct {
 		State string `json:"state"`
+		UPID  string `json:"upid"`
 	} `json:"verification"`
 }
 

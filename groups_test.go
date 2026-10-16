@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -77,6 +78,158 @@ func TestNamespaceRoot(t *testing.T) {
 	for in, want := range map[string]string{"": "", "a": "a", "a/b/c": "a"} {
 		if got := namespaceRoot(in); got != want {
 			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGroupExtendedMetrics(t *testing.T) {
+	srv := newFakePBS(t, nil)
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, `
+# HELP pbs_group_oldest_backup_timestamp_seconds Time of the oldest snapshot of the backup group.
+# TYPE pbs_group_oldest_backup_timestamp_seconds gauge
+pbs_group_oldest_backup_timestamp_seconds{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 1700000000
+pbs_group_oldest_backup_timestamp_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1700000000
+pbs_group_oldest_backup_timestamp_seconds{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1700000000
+# HELP pbs_group_last_backup_size_bytes Size of the newest snapshot of the backup group.
+# TYPE pbs_group_last_backup_size_bytes gauge
+pbs_group_last_backup_size_bytes{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 512
+pbs_group_last_backup_size_bytes{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 2048
+pbs_group_last_backup_size_bytes{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 4096
+# HELP pbs_group_snapshots_by_verify_state Number of snapshots of the backup group per verification state (ok, failed, none).
+# TYPE pbs_group_snapshots_by_verify_state gauge
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace="",state="failed"} 0
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace="",state="none"} 0
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace="",state="ok"} 1
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace="",state="failed"} 0
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace="",state="none"} 1
+pbs_group_snapshots_by_verify_state{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace="",state="ok"} 1
+pbs_group_snapshots_by_verify_state{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a",state="failed"} 1
+pbs_group_snapshots_by_verify_state{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a",state="none"} 0
+pbs_group_snapshots_by_verify_state{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a",state="ok"} 0
+# HELP pbs_group_last_verify_timestamp_seconds Start of the newest verification of any snapshot of the backup group (synced snapshots keep the verification of their source).
+# TYPE pbs_group_last_verify_timestamp_seconds gauge
+pbs_group_last_verify_timestamp_seconds{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 1700000256
+pbs_group_last_verify_timestamp_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1700000256
+pbs_group_last_verify_timestamp_seconds{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1700000256
+# HELP pbs_group_last_backup_encrypted Whether the newest snapshot of the backup group is encrypted.
+# TYPE pbs_group_last_backup_encrypted gauge
+pbs_group_last_backup_encrypted{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 0
+pbs_group_last_backup_encrypted{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 0
+pbs_group_last_backup_encrypted{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
+# HELP pbs_group_last_backup_task_success Whether the newest finished backup task of the backup group ended OK.
+# TYPE pbs_group_last_backup_task_success gauge
+pbs_group_last_backup_task_success{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
+# HELP pbs_group_last_backup_task_end_timestamp_seconds End of the newest finished backup task of the backup group.
+# TYPE pbs_group_last_backup_task_end_timestamp_seconds gauge
+pbs_group_last_backup_task_end_timestamp_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1700086500
+# HELP pbs_group_last_backup_duration_seconds Duration of the newest finished backup task of the backup group.
+# TYPE pbs_group_last_backup_duration_seconds gauge
+pbs_group_last_backup_duration_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 100
+`, "pbs_group_oldest_backup_timestamp_seconds", "pbs_group_last_backup_size_bytes", "pbs_group_snapshots_by_verify_state",
+		"pbs_group_last_verify_timestamp_seconds", "pbs_group_last_backup_encrypted", "pbs_group_backup_interval_seconds",
+		"pbs_group_last_backup_task_success", "pbs_group_last_backup_task_end_timestamp_seconds", "pbs_group_last_backup_duration_seconds")
+}
+
+// Protected snapshots, encryption and the interval of a group with enough
+// history.
+func TestGroupHistory(t *testing.T) {
+	const day = 86400
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/snapshots?ns=": {body: fmt.Sprintf(`{"data":[
+			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1,"protected":true},
+			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1},
+			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1},
+			{"backup-type":"vm","backup-id":"100","backup-time":%d,"size":1,"fingerprint":"aa:bb"}]}`,
+			1700000000-14*day, 1700000000-7*day, 1700000000-day, 1700000000)},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, `
+# HELP pbs_group_protected_snapshots Number of protected snapshots of the backup group.
+# TYPE pbs_group_protected_snapshots gauge
+pbs_group_protected_snapshots{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
+pbs_group_protected_snapshots{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
+# HELP pbs_group_last_backup_encrypted Whether the newest snapshot of the backup group is encrypted.
+# TYPE pbs_group_last_backup_encrypted gauge
+pbs_group_last_backup_encrypted{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
+pbs_group_last_backup_encrypted{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
+# HELP pbs_group_backup_interval_seconds Typical time between snapshots of the backup group: the median of the gaps between its newest 4 snapshots; omitted below 3 snapshots.
+# TYPE pbs_group_backup_interval_seconds gauge
+pbs_group_backup_interval_seconds{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 518400
+`, "pbs_group_protected_snapshots", "pbs_group_last_backup_encrypted", "pbs_group_backup_interval_seconds")
+}
+
+func TestBackupInterval(t *testing.T) {
+	const day = 86400
+	for name, tc := range map[string]struct {
+		times []int64
+		want  int64
+	}{
+		// keep-daily 7, keep-weekly 4: only the newest gaps count
+		"thinned by retention": {[]int64{0, -day, -2 * day, -3 * day, -10 * day, -17 * day, -24 * day}, day},
+		"unsorted":             {[]int64{-2 * day, 0, -day}, day},
+		"two gaps":             {[]int64{0, -day, -4 * day}, 2 * day},
+		"three gaps":           {[]int64{0, -7 * day, -8 * day, -15 * day}, 7 * day},
+		"too few":              {[]int64{0, -day}, 0},
+	} {
+		g := &groupSummary{times: tc.times}
+		got, ok := g.interval()
+		if got != tc.want || ok != (tc.want != 0) {
+			t.Errorf("%s: got %d, %t, want %d", name, got, ok, tc.want)
+		}
+	}
+}
+
+// Backup task worker IDs have no namespace: a group ID that exists in several
+// namespaces is matched by task user and owner, ambiguous ones are skipped.
+func TestMatchBackupTasks(t *testing.T) {
+	group := func(id, owner string) groupItem {
+		return groupItem{BackupType: "vm", BackupID: id, Owner: owner}
+	}
+	all := []namespaceGroups{
+		{store: "main", ns: "site-a", groups: []groupItem{group("230", "a@pbs"), group("231", "c@pbs"), group("232", "d@pbs!t1"), group("233", "x@pbs"), group("234", "y@pbs")}},
+		{store: "main", ns: "site-b", groups: []groupItem{group("230", "b@pbs!tok"), group("231", "c@pbs"), group("232", "e@pbs")}},
+	}
+	task := func(id, user string, start int64, status string) taskItem {
+		return taskItem{WorkerType: "backup", WorkerID: "main:vm/" + id, User: user, StartTime: start, EndTime: start + 10, Status: status}
+	}
+	tasks := []taskItem{
+		task("230", "a@pbs", 100, "OK"),
+		task("230", "a@pbs", 200, "backup failed"),
+		task("230", "b@pbs", 300, "OK"),
+		task("230", "b@pbs!tok", 250, "OK"),
+		task("231", "c@pbs", 100, "OK"),
+		task("232", "d@pbs!t2", 100, "OK"),
+		task("233", "x@pbs", 100, "OK"),
+		task("233", "x@pbs", 500, ""), // still running
+		task("234", "other@pbs", 100, "OK"),
+		{WorkerType: "reader", WorkerID: "main:vm/233", User: "r@pbs", StartTime: 900, EndTime: 910, Status: "OK"},
+	}
+	got := matchBackupTasks(all, tasks)
+	want := map[groupRef]int64{
+		{"main", "site-a", "vm", "230"}: 200, // newest of a@pbs, failed
+		{"main", "site-b", "vm", "230"}: 250, // exact owner before the user without token
+		{"main", "site-a", "vm", "232"}: 100, // same user, other token
+		{"main", "site-a", "vm", "233"}: 100, // finished tasks only
+		{"main", "site-a", "vm", "234"}: 100, // only group with that ID: any user (e.g. root@pam)
+	}
+	if len(got) != len(want) {
+		t.Errorf("matched %d groups, want %d: %v", len(got), len(want), got)
+	}
+	for ref, start := range want {
+		if got[ref].StartTime != start {
+			t.Errorf("%v: matched task started at %d, want %d", ref, got[ref].StartTime, start)
+		}
+	}
+}
+
+func TestParseBackupWorkerID(t *testing.T) {
+	if got, ok := parseBackupWorkerID("PBS-3309-ENF-DC01:vm/1560"); !ok || got != (backupTaskKey{"PBS-3309-ENF-DC01", "vm", "1560"}) {
+		t.Errorf("got %+v, %t", got, ok)
+	}
+	for _, in := range []string{"", "store", "store:vm", "store:/1", ":vm/1"} {
+		if _, ok := parseBackupWorkerID(in); ok {
+			t.Errorf("%q: expected no match", in)
 		}
 	}
 }
