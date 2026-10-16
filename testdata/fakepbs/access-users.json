@@ -1,0 +1,9 @@
+{
+  "data": [
+    {"userid": "root@pam", "enable": null, "expire": null, "comment": "secret: hunter2", "tokens": []},
+    {"userid": "mon@pbs", "enable": false, "expire": 1900000000, "tokens": [
+      {"tokenid": "mon@pbs!exporter", "enable": true, "expire": 1800000000, "comment": "token secret"},
+      {"tokenid": "mon@pbs!old", "expire": 0}
+    ]}
+  ]
+}

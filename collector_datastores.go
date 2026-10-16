@@ -26,6 +26,56 @@ var (
 		"The used bytes of the underlying storage of the datastore.",
 		[]string{"datastore"}, nil,
 	)
+	datastoreEstimatedFull = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "estimated_full_timestamp_seconds"),
+		"When PBS expects the datastore to be full; omitted without an estimate or when it is in the past.",
+		[]string{"datastore"}, nil,
+	)
+	datastoreMounted = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "mounted"),
+		"Whether a removable datastore is mounted; omitted for other datastores.",
+		[]string{"datastore"}, nil,
+	)
+	datastoreMaintenance = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "maintenance"),
+		"Present while the datastore is in maintenance mode, always 1.",
+		[]string{"datastore", "mode"}, nil,
+	)
+	datastoreInfo = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "info"),
+		"Settings of the datastore, always 1.",
+		[]string{"datastore", "verify_new", "notification_mode", "gc_schedule", "backend_type"}, nil,
+	)
+	datastoreKeep = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "keep"),
+		"Retention setting of the datastore.",
+		[]string{"datastore", "keep"}, nil,
+	)
+	gcDiskBytes = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "gc", "disk_bytes"),
+		"Bytes used by chunks, as of the last garbage collection.",
+		[]string{"datastore"}, nil,
+	)
+	gcIndexDataBytes = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "gc", "index_data_bytes"),
+		"Bytes referenced by indexes, as of the last garbage collection (divided by the disk bytes: deduplication factor).",
+		[]string{"datastore"}, nil,
+	)
+	gcPendingBytes = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "gc", "pending_bytes"),
+		"Bytes waiting for removal by the next garbage collection.",
+		[]string{"datastore"}, nil,
+	)
+	gcRemovedBytes = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "gc", "removed_bytes"),
+		"Bytes removed by the last garbage collection.",
+		[]string{"datastore"}, nil,
+	)
+	gcBadChunks = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "gc", "bad_chunks"),
+		"Corrupt chunks found by the last garbage collection: still_bad are still referenced by snapshots, removed_bad were removed.",
+		[]string{"datastore", "state"}, nil,
+	)
 )
 
 // datastoreUsage is an entry of /status/datastore-usage.
@@ -40,6 +90,29 @@ type datastoreUsage struct {
 	Error       string `json:"error"`
 	MountStatus string `json:"mount-status"`
 	BackendType string `json:"backend-type"`
+	// EstimatedFullDate is unix seconds, PBS reports a date in the past or
+	// none when it can not tell.
+	EstimatedFullDate *int64    `json:"estimated-full-date"`
+	GCStatus          *gcStatus `json:"gc-status"`
+}
+
+// gcStatus are the statistics of the last garbage collection.
+type gcStatus struct {
+	DiskBytes      *int64 `json:"disk-bytes"`
+	IndexDataBytes *int64 `json:"index-data-bytes"`
+	PendingBytes   *int64 `json:"pending-bytes"`
+	RemovedBytes   *int64 `json:"removed-bytes"`
+	StillBad       *int64 `json:"still-bad"`
+	RemovedBad     *int64 `json:"removed-bad"`
+}
+
+// datastoreConfig is an entry of /config/datastore.
+type datastoreConfig struct {
+	Name             string `json:"name"`
+	VerifyNew        *bool  `json:"verify-new"`
+	NotificationMode string `json:"notification-mode"`
+	GCSchedule       string `json:"gc-schedule"`
+	keepOptions
 }
 
 // datastoreListItem is an entry of /admin/datastore.
@@ -156,23 +229,87 @@ var datastoresCollector = &collector{
 	name:      "datastores",
 	enabled:   true,
 	privilege: "Datastore.Audit on /datastore",
-	descs:     []*prometheus.Desc{available, size, used},
+	descs: []*prometheus.Desc{
+		available, size, used, datastoreEstimatedFull, datastoreMounted, datastoreMaintenance,
+		datastoreInfo, datastoreKeep, gcDiskBytes, gcIndexDataBytes, gcPendingBytes, gcRemovedBytes, gcBadChunks,
+	},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		usage, err := s.getDatastoreUsage(ctx)
 		if err != nil {
 			return err
 		}
+		backendTypes := map[string]string{}
 		for _, d := range usage {
-			if d.Error != "" {
-				slog.Debug("datastore without usage", "datastore", sanitize(d.Store), "err", sanitize(d.Error))
-			}
-			// no series without a value: 0 bytes would read as a full datastore
-			for desc, v := range map[*prometheus.Desc]*int64{available: d.Avail, size: d.Total, used: d.Used} {
-				if v != nil {
-					ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(*v), d.Store)
-				}
-			}
+			backendTypes[d.Store] = d.BackendType
+			collectDatastoreUsage(s, d, ch)
 		}
-		return nil
+		return errors.Join(
+			collectDatastoreMaintenance(ctx, s, ch),
+			collectDatastoreConfig(ctx, s, backendTypes, ch),
+		)
 	},
+}
+
+func collectDatastoreUsage(s *scrapeState, d datastoreUsage, ch chan<- prometheus.Metric) {
+	gauge := func(desc *prometheus.Desc, v float64, extra ...string) {
+		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, v, append([]string{d.Store}, extra...)...)
+	}
+	optGauge := func(desc *prometheus.Desc, v *int64, extra ...string) {
+		if v != nil {
+			gauge(desc, float64(*v), extra...)
+		}
+	}
+	if d.Error != "" {
+		slog.Debug("datastore without usage", "datastore", sanitize(d.Store), "err", sanitize(d.Error))
+	}
+	// no series without a value: 0 bytes would read as a full datastore
+	optGauge(available, d.Avail)
+	optGauge(size, d.Total)
+	optGauge(used, d.Used)
+	// a date in the past means PBS has no useful estimate
+	if d.EstimatedFullDate != nil && *d.EstimatedFullDate > s.now.Unix() {
+		gauge(datastoreEstimatedFull, float64(*d.EstimatedFullDate))
+	}
+	switch d.MountStatus {
+	case "mounted":
+		gauge(datastoreMounted, 1)
+	case "notmounted":
+		gauge(datastoreMounted, 0)
+	}
+	if gc := d.GCStatus; gc != nil {
+		optGauge(gcDiskBytes, gc.DiskBytes)
+		optGauge(gcIndexDataBytes, gc.IndexDataBytes)
+		optGauge(gcPendingBytes, gc.PendingBytes)
+		optGauge(gcRemovedBytes, gc.RemovedBytes)
+		optGauge(gcBadChunks, gc.StillBad, "still_bad")
+		optGauge(gcBadChunks, gc.RemovedBad, "removed_bad")
+	}
+}
+
+func collectDatastoreMaintenance(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
+	list, err := s.getDatastoreList(ctx)
+	if err != nil {
+		return err
+	}
+	for _, d := range list {
+		if d.Maintenance != "" {
+			ch <- prometheus.MustNewConstMetric(datastoreMaintenance, prometheus.GaugeValue, 1, d.Store, maintenanceType(d.Maintenance))
+		}
+	}
+	return nil
+}
+
+func collectDatastoreConfig(ctx context.Context, s *scrapeState, backendTypes map[string]string, ch chan<- prometheus.Metric) error {
+	var configs []datastoreConfig
+	if err := s.api.get(ctx, apiPath("config", "datastore"), nil, &configs); err != nil {
+		return err
+	}
+	for _, c := range configs {
+		ch <- prometheus.MustNewConstMetric(datastoreInfo, prometheus.GaugeValue, 1,
+			c.Name, optBool(c.VerifyNew), c.NotificationMode, c.GCSchedule, backendTypes[c.Name])
+		for keep, v := range c.set() {
+			ch <- prometheus.MustNewConstMetric(datastoreKeep, prometheus.GaugeValue, float64(v), c.Name, keep)
+		}
+	}
+	return nil
 }

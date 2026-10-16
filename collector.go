@@ -50,6 +50,9 @@ func allCollectors() []*collector {
 		tasksCollector,
 		zfsCollector,
 		timeCollector,
+		aptCollector,
+		accessCollector,
+		disksCollector,
 	}
 }
 
@@ -181,6 +184,7 @@ type scrapeState struct {
 	snapshots      memo[storeNamespace, []snapshotItem]
 	tasks          memo[struct{}, []taskItem]
 	permissions    memo[struct{}, permissions]
+	nodeStatus     memo[struct{}, nodeStatus]
 }
 
 type storeNamespace struct {

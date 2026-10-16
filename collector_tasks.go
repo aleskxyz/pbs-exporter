@@ -7,15 +7,50 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var tasksRunning = prometheus.NewDesc(
-	prometheus.BuildFQName(promNamespace, "", "tasks_running"),
-	"Number of running tasks.",
-	[]string{"worker_type"}, nil,
+var (
+	tasksRunning = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "", "tasks_running"),
+		"Number of running tasks.",
+		[]string{"worker_type"}, nil,
+	)
+	taskFailures = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "", "task_failures"),
+		"Tasks that ended with an error in the last 24 hours (warnings do not count); omitted when there are none.",
+		[]string{"worker_type", "store"}, nil,
+	)
 )
+
+// taskFailureWindow is how far back pbs_task_failures counts.
+const taskFailureWindow = 24 * time.Hour
+
+// storeWorkerTypes have the datastore as first part of their worker ID.
+var storeWorkerTypes = map[string]bool{
+	"backup": true, "reader": true, "prune": true, "prunejob": true, "garbage_collection": true,
+	"verificationjob": true, "verify": true, "verify_group": true, "verify_snapshot": true,
+}
+
+// taskStore returns the datastore a task worked on, "" if it has none.
+func taskStore(t taskItem) string {
+	if t.WorkerType == "syncjob" {
+		id, _ := parseSyncWorkerID(t.WorkerID)
+		return id.store
+	}
+	if storeWorkerTypes[t.WorkerType] {
+		store, _, _ := strings.Cut(t.WorkerID, ":")
+		return store
+	}
+	return ""
+}
+
+// taskFailed reports whether a finished task ended with an error.
+func taskFailed(t taskItem) bool {
+	return t.finished() && !succeeded(t.Status)
+}
 
 // taskItem is an entry of /nodes/localhost/tasks.
 type taskItem struct {
@@ -132,20 +167,43 @@ var tasksCollector = &collector{
 	name:      "tasks",
 	enabled:   true,
 	privilege: "Sys.Audit on /system/tasks",
-	descs:     []*prometheus.Desc{tasksRunning},
+	descs:     []*prometheus.Desc{tasksRunning, taskFailures},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
-		q := url.Values{"running": {"1"}, "limit": {strconv.Itoa(s.module.taskLimit)}}
-		var running []taskItem
-		if err := s.api.get(ctx, apiPath("nodes", "localhost", "tasks"), q, &running); err != nil {
-			return err
-		}
-		counts := map[string]int{}
-		for _, t := range running {
-			counts[t.WorkerType]++
-		}
-		for workerType, n := range counts {
-			ch <- prometheus.MustNewConstMetric(tasksRunning, prometheus.GaugeValue, float64(n), workerType)
-		}
-		return s.taskLogFiltered(ctx)
+		return joinUnique(collectRunningTasks(ctx, s, ch), collectTaskFailures(ctx, s, ch))
 	},
+}
+
+func collectTaskFailures(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
+	tasks, err := s.getTasks(ctx)
+	if !usableTasks(err) {
+		return err
+	}
+	type key struct{ workerType, store string }
+	since := s.now.Add(-taskFailureWindow).Unix()
+	counts := map[key]int{}
+	for _, t := range tasks {
+		if taskFailed(t) && t.EndTime >= since {
+			counts[key{t.WorkerType, taskStore(t)}]++
+		}
+	}
+	for k, n := range counts {
+		ch <- prometheus.MustNewConstMetric(taskFailures, prometheus.GaugeValue, float64(n), k.workerType, k.store)
+	}
+	return err
+}
+
+func collectRunningTasks(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
+	q := url.Values{"running": {"1"}, "limit": {strconv.Itoa(s.module.taskLimit)}}
+	var running []taskItem
+	if err := s.api.get(ctx, apiPath("nodes", "localhost", "tasks"), q, &running); err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	for _, t := range running {
+		counts[t.WorkerType]++
+	}
+	for workerType, n := range counts {
+		ch <- prometheus.MustNewConstMetric(tasksRunning, prometheus.GaugeValue, float64(n), workerType)
+	}
+	return s.taskLogFiltered(ctx)
 }

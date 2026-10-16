@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"Package": "proxmox-backup-server", "OldVersion": "4.2.0-1", "Version": "4.2.1-1", "Title": "Proxmox Backup Server"},
+    {"Package": "proxmox-kernel-6.8", "OldVersion": "6.8.12-9", "Version": "6.8.12-11", "Title": "Latest Proxmox Kernel Image"}
+  ]
+}

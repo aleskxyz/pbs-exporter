@@ -62,6 +62,7 @@ func TestGroupMetricsWithoutSnapshots(t *testing.T) {
 	compare(t, e, `
 # HELP pbs_collector_success Whether a collector succeeded in the last scrape.
 # TYPE pbs_collector_success gauge
+pbs_collector_success{collector="apt"} 1
 pbs_collector_success{collector="datastores"} 1
 pbs_collector_success{collector="groups"} 0
 pbs_collector_success{collector="jobs"} 1

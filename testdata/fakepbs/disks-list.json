@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"name": "nvme0n1", "model": "Example NVMe 3.2TB", "serial": "N0001", "status": "unknown", "wearout": null, "disk-type": "ssd", "used": "zfs"},
+    {"name": "sda", "model": "Example SSD", "serial": "S0001", "status": "passed", "wearout": 97, "disk-type": "ssd", "used": "zfs"}
+  ]
+}

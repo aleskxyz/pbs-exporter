@@ -6,7 +6,17 @@
       "total": 3000,
       "used": 2000,
       "mount-status": "nonremovable",
-      "backend-type": "filesystem"
+      "backend-type": "filesystem",
+      "estimated-full-date": 4102444800,
+      "gc-status": {
+        "disk-bytes": 1000000,
+        "index-data-bytes": 5000000,
+        "pending-bytes": 100,
+        "removed-bytes": 2000,
+        "removed-bad": 1,
+        "still-bad": 0,
+        "upid": "UPID:pbs:00000001:00000002:00000004:6553F100:garbage_collection:store1:root@pam:"
+      }
     }
   ]
 }

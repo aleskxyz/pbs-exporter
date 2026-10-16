@@ -66,9 +66,21 @@ type nodeStatus struct {
 		Total int64 `json:"total"`
 		Used  int64 `json:"used"`
 	} `json:"root"`
-	Load   []float64 `json:"loadavg"`
-	Uptime int64     `json:"uptime"`
-	Wait   float64   `json:"wait"`
+	Load          []float64 `json:"loadavg"`
+	Uptime        int64     `json:"uptime"`
+	Wait          float64   `json:"wait"`
+	CurrentKernel struct {
+		Release string `json:"release"`
+	} `json:"current-kernel"`
+}
+
+// getNodeStatus returns /nodes/localhost/status, fetched once per scrape.
+func (s *scrapeState) getNodeStatus(ctx context.Context) (nodeStatus, error) {
+	return s.nodeStatus.get(struct{}{}, func() (nodeStatus, error) {
+		var st nodeStatus
+		err := s.api.get(ctx, apiPath("nodes", "localhost", "status"), nil, &st)
+		return st, err
+	})
 }
 
 // NOTE: According to the api documentation, we have to provide the node name (won't work with the node ip),
@@ -91,8 +103,8 @@ var nodeCollector = &collector{
 }
 
 func collectNodeStatus(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
-	var st nodeStatus
-	if err := s.api.get(ctx, apiPath("nodes", "localhost", "status"), nil, &st); err != nil {
+	st, err := s.getNodeStatus(ctx)
+	if err != nil {
 		return err
 	}
 	gauge := func(d *prometheus.Desc, v float64) {

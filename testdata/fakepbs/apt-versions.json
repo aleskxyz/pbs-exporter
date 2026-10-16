@@ -1,0 +1,10 @@
+{
+  "data": [
+    {"Package": "proxmox-backup-server", "OldVersion": "4.2.0-1", "Version": "4.2.0-1"},
+    {"Package": "proxmox-kernel-helper", "OldVersion": "9.2.0", "Version": "9.2.0"},
+    {"Package": "proxmox-kernel-6.8", "OldVersion": "6.8.12-9", "Version": "6.8.12-11"},
+    {"Package": "proxmox-kernel-6.8.12-4-pve-signed", "OldVersion": "6.8.12-4", "Version": "6.8.12-4"},
+    {"Package": "proxmox-kernel-6.8.12-9-pve-signed", "OldVersion": "6.8.12-9", "Version": "6.8.12-9"},
+    {"Package": "proxmox-kernel-6.8.12-11-pve-signed", "OldVersion": "", "Version": "6.8.12-11"}
+  ]
+}

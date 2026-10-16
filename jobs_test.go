@@ -136,6 +136,7 @@ pbs_sync_job_info{datastore="store1",group_filter="",job_id="s-1",pbs_namespace=
 pbs_sync_job_info{datastore="store1",group_filter="",job_id="s-2",pbs_namespace="",remote="pbs-c",remote_ns="",remote_store="other",remove_vanished="",schedule="",source="tasks",sync_direction="",transfer_last=""} 1
 # HELP pbs_collector_success Whether a collector succeeded in the last scrape.
 # TYPE pbs_collector_success gauge
+pbs_collector_success{collector="apt"} 1
 pbs_collector_success{collector="datastores"} 1
 pbs_collector_success{collector="groups"} 1
 pbs_collector_success{collector="node"} 1

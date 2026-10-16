@@ -47,12 +47,12 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-var allOK = map[string]float64{"datastores": 1, "groups": 1, "jobs": 1, "node": 1, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}
+var allOK = map[string]float64{"apt": 1, "datastores": 1, "groups": 1, "jobs": 1, "node": 1, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}
 
 func collectorStatus(collectors map[string]float64) string {
 	var b strings.Builder
 	b.WriteString("# HELP pbs_collector_success Whether a collector succeeded in the last scrape.\n# TYPE pbs_collector_success gauge\n")
-	for _, name := range []string{"datastores", "groups", "jobs", "node", "snapshots", "sync", "tasks", "time", "version", "zfs"} {
+	for _, name := range []string{"apt", "datastores", "groups", "jobs", "node", "snapshots", "sync", "tasks", "time", "version", "zfs"} {
 		if v, ok := collectors[name]; ok {
 			fmt.Fprintf(&b, "pbs_collector_success{collector=%q} %g\n", name, v)
 		}
@@ -100,7 +100,7 @@ func TestCollectorFailureIsIsolated(t *testing.T) {
 		"/api2/json/nodes/localhost/status": {status: http.StatusInternalServerError, body: `{"data":null,"message":"boom"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "groups": 1, "jobs": 1, "node": 0, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1})+`
+	compare(t, e, collectorStatus(map[string]float64{"apt": 0, "datastores": 1, "groups": 1, "jobs": 1, "node": 0, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1})+`
 # HELP pbs_up Was the last query of PBS successful (the version call).
 # TYPE pbs_up gauge
 pbs_up 1
@@ -108,7 +108,8 @@ pbs_up 1
 # TYPE pbs_datastore_available_bytes gauge
 pbs_datastore_available_bytes{datastore="store1"} 1000
 `, "pbs_collector_success", "pbs_up", "pbs_datastore_available_bytes", "pbs_host_cpu_usage_ratio")
-	// the subscription of the same collector is still exported
+	// apt reads the running kernel from the same response and fails as well;
+	// the subscription of the node collector is still exported
 	if n := testutil.CollectAndCount(e, "pbs_host_subscription_info"); n != 1 {
 		t.Errorf("pbs_host_subscription_info: %d series, want 1", n)
 	}
@@ -123,7 +124,7 @@ func TestForbiddenNamesPrivilege(t *testing.T) {
 		"/api2/json/admin/datastore/store1/namespace": {status: http.StatusForbidden, body: `{"data":null,"message":"permission check failed"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "groups": 0, "jobs": 1, "node": 1, "snapshots": 0, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}), "pbs_collector_success")
+	compare(t, e, collectorStatus(map[string]float64{"apt": 1, "datastores": 1, "groups": 0, "jobs": 1, "node": 1, "snapshots": 0, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}), "pbs_collector_success")
 	if !strings.Contains(logs.String(), `required_privilege="Datastore.Audit on /datastore"`) {
 		t.Errorf("the log does not name the privilege:\n%s", logs)
 	}
@@ -285,7 +286,7 @@ func TestMaintenanceType(t *testing.T) {
 func TestDisabledCollector(t *testing.T) {
 	srv := newFakePBS(t, nil)
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "jobs": 1, "node": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}), "pbs_collector_success")
+	compare(t, e, collectorStatus(map[string]float64{"apt": 1, "datastores": 1, "jobs": 1, "node": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1}), "pbs_collector_success")
 	for _, r := range srv.Requests() {
 		if strings.Contains(r, "/namespace") || strings.Contains(r, "/snapshots") || strings.Contains(r, "/groups") {
 			t.Errorf("disabled collector made request %s", r)
@@ -337,7 +338,7 @@ func TestCollectorConfig(t *testing.T) {
 	for _, c := range m.collectors {
 		names = append(names, c.name)
 	}
-	if want := []string{"version", "node", "datastores", "groups", "jobs", "sync", "tasks", "zfs", "time"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
+	if want := []string{"version", "node", "datastores", "groups", "jobs", "sync", "tasks", "zfs", "time", "apt"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
 		t.Errorf("collectors %v, max_concurrency %d", names, m.maxConcurrency)
 	}
 
