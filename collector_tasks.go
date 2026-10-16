@@ -20,7 +20,7 @@ var (
 	)
 	taskFailures = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "", "task_failures"),
-		"Tasks that ended with an error in the last 24 hours (warnings do not count); omitted when there are none.",
+		"Tasks that ended with an error in the last 24 hours, or task_lookback if shorter (warnings do not count); omitted when there are none.",
 		[]string{"worker_type", "store"}, nil,
 	)
 )
@@ -30,6 +30,8 @@ const taskFailureWindow = 24 * time.Hour
 
 // storeWorkerTypes have the datastore as first part of their worker ID.
 var storeWorkerTypes = map[string]bool{
+	// "sync" is a sync started by hand, its worker ID is the local datastore
+	"sync":   true,
 	"backup": true, "reader": true, "prune": true, "prunejob": true, "garbage_collection": true,
 	"verificationjob": true, "verify": true, "verify_group": true, "verify_snapshot": true,
 }

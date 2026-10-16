@@ -27,7 +27,7 @@ var (
 	)
 	readerTasks = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "", "reader_tasks"),
-		"Reader tasks (restores, and syncs from other servers) started in the last 24 hours.",
+		"Reader tasks (restores, and syncs from other servers) started in the last 24 hours, or task_lookback if shorter.",
 		[]string{"user"}, nil,
 	)
 )

@@ -80,17 +80,19 @@ func TestTaskFailures(t *testing.T) {
 			task("backup", "store1:vm/102", 30*3600, "too old"),
 			task("verificationjob", "store1:v-1", 3600, "WARNINGS: 2"),
 			task("syncjob", "pbs-b:main:store2::s-1", 3600, "connection refused"),
+			task("sync", "store3", 3600, "remote unreachable"),
 			task("aptupdate", "", 3600, "apt-get update failed"),
 			task("reader", "store1:vm/100", 3600, "OK"),
 		}, ",") + `]}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
 	compare(t, e, `
-# HELP pbs_task_failures Tasks that ended with an error in the last 24 hours (warnings do not count); omitted when there are none.
+# HELP pbs_task_failures Tasks that ended with an error in the last 24 hours, or task_lookback if shorter (warnings do not count); omitted when there are none.
 # TYPE pbs_task_failures gauge
 pbs_task_failures{store="",worker_type="aptupdate"} 1
 pbs_task_failures{store="store1",worker_type="backup"} 2
 pbs_task_failures{store="store2",worker_type="syncjob"} 1
+pbs_task_failures{store="store3",worker_type="sync"} 1
 `, "pbs_task_failures")
 }
 
@@ -132,6 +134,14 @@ func TestCompareKernelVersions(t *testing.T) {
 			t.Errorf("%s vs %s: got %d, want %d", tc.a, tc.b, got, tc.want)
 		}
 	}
+	// a backport kernel (opt-in kernel of PBS 3.4) is newer than 6.8
+	if got := newestInstalledKernel([]aptPackage{
+		{"proxmox-kernel-6.8.12-11-pve-signed", "6.8.12-11"},
+		{"proxmox-kernel-6.14.8-2-bpo12-pve-signed", "6.14.8-2"},
+		{"proxmox-kernel-6.14.11-4-bpo12-pve-signed", "6.14.11-4"},
+	}); got != "6.14.11-4-bpo12" || compareKernelVersions(got, "6.14.8-2-bpo12") <= 0 {
+		t.Errorf("newest installed backport kernel %q", got)
+	}
 	if got := newestInstalledKernel([]aptPackage{
 		{"pve-kernel-5.15.30-2-pve", "5.15.30-2"},
 		{"proxmox-kernel-6.2.16-20-pve", "6.2.16-20"},
@@ -169,7 +179,7 @@ pbs_user_expiry_timestamp_seconds{userid="mon@pbs"} 1.9e+09
 # HELP pbs_token_expiry_timestamp_seconds When the API token expires; omitted when it never expires.
 # TYPE pbs_token_expiry_timestamp_seconds gauge
 pbs_token_expiry_timestamp_seconds{tokenid="mon@pbs!exporter"} 1.8e+09
-# HELP pbs_reader_tasks Reader tasks (restores, and syncs from other servers) started in the last 24 hours.
+# HELP pbs_reader_tasks Reader tasks (restores, and syncs from other servers) started in the last 24 hours, or task_lookback if shorter.
 # TYPE pbs_reader_tasks gauge
 pbs_reader_tasks{user="alice@pbs"} 1
 pbs_reader_tasks{user="sync@pbs"} 2
@@ -187,5 +197,18 @@ pbs_disk_wearout_ratio{disk="sda"} 0.03
 	code, body := scrape(t, h, "module=site")
 	if code != http.StatusOK || strings.Contains(body, "hunter2") || strings.Contains(body, "token secret") {
 		t.Errorf("status %d, or a comment was exported:\n%s", code, body)
+	}
+}
+
+// A datastore without garbage collection so far has a gc-status of zeros
+// and no UPID; no GC series are exported for it.
+func TestGCStatusWithoutGC(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/status/datastore-usage": {body: `{"data":[{"store":"store1","mount-status":"nonremovable",
+			"gc-status":{"disk-bytes":0,"index-data-bytes":0,"pending-bytes":0,"removed-bytes":0,"still-bad":0,"removed-bad":0}}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	if got := seriesOf(t, e, "pbs_gc_disk_bytes", "pbs_gc_index_data_bytes", "pbs_gc_bad_chunks"); len(got) != 0 {
+		t.Errorf("GC series without a garbage collection: %v", got)
 	}
 }

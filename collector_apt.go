@@ -24,8 +24,9 @@ var (
 )
 
 // kernelPackage matches the versioned kernel packages, e.g.
-// "proxmox-kernel-6.8.12-4-pve-signed" (PBS 3+) or "pve-kernel-5.15.30-2-pve".
-var kernelPackage = regexp.MustCompile(`^(?:proxmox|pve)-kernel-(\d+\.\d+\.\d+-\d+)-pve(?:-signed)?$`)
+// "proxmox-kernel-6.8.12-4-pve-signed" (PBS 3+), "pve-kernel-5.15.30-2-pve"
+// or the backport "proxmox-kernel-6.14.8-2-bpo12-pve-signed".
+var kernelPackage = regexp.MustCompile(`^(?:proxmox|pve)-kernel-(\d+\.\d+\.\d+-\d+(?:-bpo\d+)?)-pve(?:-signed)?$`)
 
 // aptPackage is an entry of /nodes/localhost/apt/{update,versions}.
 type aptPackage struct {
@@ -77,7 +78,7 @@ func newestInstalledKernel(packages []aptPackage) string {
 var aptCollector = &collector{
 	name:      "apt",
 	enabled:   true,
-	privilege: "Sys.Audit on /system",
+	privilege: "Sys.Audit on /",
 	descs:     []*prometheus.Desc{aptUpdatesAvailable, rebootRequired},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		return errors.Join(collectAptUpdates(ctx, s, ch), collectRebootRequired(ctx, s, ch))

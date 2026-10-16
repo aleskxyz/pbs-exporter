@@ -98,6 +98,8 @@ type datastoreUsage struct {
 
 // gcStatus are the statistics of the last garbage collection.
 type gcStatus struct {
+	// UPID is the task of the last garbage collection, empty if there was none.
+	UPID           string `json:"upid"`
 	DiskBytes      *int64 `json:"disk-bytes"`
 	IndexDataBytes *int64 `json:"index-data-bytes"`
 	PendingBytes   *int64 `json:"pending-bytes"`
@@ -276,7 +278,8 @@ func collectDatastoreUsage(s *scrapeState, d datastoreUsage, ch chan<- prometheu
 	case "notmounted":
 		gauge(datastoreMounted, 0)
 	}
-	if gc := d.GCStatus; gc != nil {
+	// without a garbage collection so far, PBS reports zeros
+	if gc := d.GCStatus; gc != nil && gc.UPID != "" {
 		optGauge(gcDiskBytes, gc.DiskBytes)
 		optGauge(gcIndexDataBytes, gc.IndexDataBytes)
 		optGauge(gcPendingBytes, gc.PendingBytes)
