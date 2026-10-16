@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -18,25 +19,26 @@ func errText(err error) string {
 	return strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\r", ""), "\n", "; ")
 }
 
-// parseLogLevel maps the PBS_LOGLEVEL values to a slog level. Unknown values
-// fall back to info, as before.
-func parseLogLevel(s string) slog.Level {
+// parseLogLevel maps the log_level values to a slog level.
+func parseLogLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(s) {
 	case "debug":
-		return slog.LevelDebug
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
 	case "warn", "warning":
-		return slog.LevelWarn
+		return slog.LevelWarn, nil
 	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
+		return slog.LevelError, nil
 	}
+	return 0, fmt.Errorf("unknown log level %q", s)
 }
 
-// setupLogging makes a text logger with the given level the default, also for
-// the standard log package.
+// setupLogging makes a text logger with the given (validated) level the
+// default, also for the standard log package.
 func setupLogging(level string) {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(level)})))
+	lvl, _ := parseLogLevel(level)
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
 }
 
 // fatal logs an error and exits.

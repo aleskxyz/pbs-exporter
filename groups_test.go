@@ -331,7 +331,7 @@ func TestDuplicateGroupIsSkipped(t *testing.T) {
 			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"},
 			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"}]}`},
 	})
-	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{})}, true, testTimeouts)
+	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{})}, testTimeouts)
 	if code, body := scrape(t, h, "module=site"); code != http.StatusOK || !strings.Contains(body, `pbs_collector_success{collector="groups"} 1`) {
 		t.Errorf("status %d:\n%s", code, body)
 	}

@@ -1,3 +1,6 @@
+# The configuration is read from pbs-exporter.yml next to this file (see
+# pbs-exporter.example.yml). The container runs as user 65534, which must be
+# able to read it, e.g.: chown 65534 pbs-exporter.yml && chmod 400 pbs-exporter.yml
 services:
   pbs-exporter:
     image: ghcr.io/natrontech/pbs-exporter:latest
@@ -6,7 +9,5 @@ services:
     restart: always
     ports:
       - "10019:10019"
-    environment:
-      - PBS_API_TOKEN=
-      - PBS_ENDPOINT=https://pbs-server:8007
-      - PBS_INSECURE=false
+    volumes:
+      - ./pbs-exporter.yml:/etc/pbs-exporter/config.yml:ro

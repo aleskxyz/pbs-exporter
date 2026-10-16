@@ -2,7 +2,8 @@
 #
 # Setup:
 # - exporter instance: pbs-exporter:10019
-# - PBS target set in env PBS_ENDPOINT
+# - the PBS is the module "default" of the exporter's config file, which a
+#   scrape without the "module" parameter uses
 
 scrape_configs:
 - job_name: 'pbs-exporter'
@@ -13,7 +14,7 @@ scrape_configs:
   scheme: http
   static_configs:
   - targets:
-    - 'pbs-exporter:10019' # PBS_ENDPOINT set to target
+    - 'pbs-exporter:10019'
 
 
 # example with relablings to have the host name (e.g. host-001) as metric label "instance"
@@ -25,7 +26,7 @@ scrape_configs:
   scheme: http
   static_configs:
   - targets:
-    - 'pbs-exporter@host-001' # PBS_ENDPOINT set to target
+    - 'pbs-exporter@host-001'
   relabel_configs:
   - source_labels: [ __address__ ]
     regex: '.*@(.*)'

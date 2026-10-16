@@ -13,7 +13,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/semaphore"
 )
 
 const promNamespace = "pbs"
@@ -105,27 +104,6 @@ func enabledCollectors(overrides map[string]bool) []*collector {
 		}
 	}
 	return enabled
-}
-
-// parseCollectorList parses a comma separated list of collectors to enable
-// ("name") or disable ("-name"), e.g. "access,-apt".
-func parseCollectorList(s string) (map[string]bool, error) {
-	overrides := map[string]bool{}
-	for _, item := range strings.Split(s, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		on := true
-		if name, ok := strings.CutPrefix(item, "-"); ok {
-			item, on = name, false
-		}
-		overrides[item] = on
-	}
-	if err := validateCollectors(overrides); err != nil {
-		return nil, err
-	}
-	return overrides, nil
 }
 
 // memo fetches a value once per key and shares it between the collectors of a
@@ -224,12 +202,6 @@ type Exporter struct {
 // NewExporter returns the collector of one scrape of endpoint with module.
 // All PBS requests stop when ctx is done or after timeout, whichever is first.
 func NewExporter(ctx context.Context, endpoint string, module *Module, timeout time.Duration) *Exporter {
-	sem := module.sem
-	if module.endpoint == "" {
-		// the legacy module scrapes any "target": a limit shared by all
-		// targets would let one slow PBS block the scrapes of the others
-		sem = semaphore.NewWeighted(int64(module.maxConcurrency))
-	}
 	return &Exporter{
 		ctx:     ctx,
 		timeout: timeout,
@@ -238,7 +210,7 @@ func NewExporter(ctx context.Context, endpoint string, module *Module, timeout t
 			endpoint:            endpoint,
 			authorizationHeader: module.authorizationHeader,
 			client:              module.client,
-			sem:                 sem,
+			sem:                 module.sem,
 		},
 	}
 }
@@ -330,9 +302,8 @@ func recoverErr(f func() error) (err error) {
 	return f()
 }
 
-// endpointHost returns the host of endpoint as label value; the "target"
-// parameter of the legacy module may contain invalid UTF-8, which a label
-// value must not.
+// endpointHost returns the host of endpoint as label value, which must be
+// valid UTF-8.
 func endpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {

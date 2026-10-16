@@ -19,8 +19,16 @@ import (
 
 const defaultModuleName = "default"
 
-// defaultModuleTimeout is the timeout of a config file module that sets none.
-// The config file does not inherit pbs.timeout / PBS_TIMEOUT.
+// Defaults of the server settings.
+const (
+	defaultListenAddress       = ":10019"
+	defaultMetricsPath         = "/metrics"
+	defaultLogLevel            = "info"
+	defaultScrapeTimeout       = 30 * time.Second
+	defaultScrapeTimeoutOffset = 500 * time.Millisecond
+)
+
+// defaultModuleTimeout is the timeout of requests of a module that sets none.
 const defaultModuleTimeout = 5 * time.Second
 
 // defaultMaxConcurrency is the number of concurrent requests to one PBS of a
@@ -34,36 +42,87 @@ const defaultTaskLookback = 8 * 24 * time.Hour
 // defaultTaskLimit is the default maximum number of tasks read from the task log.
 const defaultTaskLimit = 10000
 
+// Config is the content of the config file.
+type Config struct {
+	Server ServerConfig `yaml:"server"`
+	// Defaults are module settings that apply to every module that does not
+	// set them itself.
+	Defaults ModuleConfig `yaml:"defaults"`
+	// Modules are the Proxmox Backup Servers, selected per scrape with the
+	// "module" URL parameter. After ParseConfig, they are merged with
+	// Defaults and validated.
+	Modules map[string]ModuleConfig `yaml:"modules"`
+}
+
+// ServerConfig are the settings of the exporter's HTTP server. After
+// ParseConfig, every field is set.
+type ServerConfig struct {
+	ListenAddress string `yaml:"listen_address"`
+	MetricsPath   string `yaml:"metrics_path"`
+	// LogLevel is debug, info, warn or error.
+	LogLevel string `yaml:"log_level"`
+	// ScrapeTimeout limits a scrape if Prometheus sends no
+	// X-Prometheus-Scrape-Timeout-Seconds header.
+	ScrapeTimeout *Duration `yaml:"scrape_timeout"`
+	// ScrapeTimeoutOffset is subtracted from the timeout Prometheus sends, to
+	// leave time for sending the response.
+	ScrapeTimeoutOffset *Duration `yaml:"scrape_timeout_offset"`
+}
+
+// timeouts returns the scrape timeouts of the server settings.
+func (s ServerConfig) timeouts() scrapeTimeouts {
+	return scrapeTimeouts{fallback: time.Duration(*s.ScrapeTimeout), offset: time.Duration(*s.ScrapeTimeoutOffset)}
+}
+
 // ModuleConfig holds the credentials and connection settings used to talk to a
-// Proxmox Backup Server. A module is selected per scrape with the "module" URL
-// parameter, the same way prometheus-pve-exporter does it.
+// Proxmox Backup Server. Settings that are not set (nil, "") are taken from
+// the defaults section, then from the built-in defaults.
 type ModuleConfig struct {
-	// User is the PBS user the API token belongs to, e.g. "root@pam".
+	// Endpoint is the PBS the module scrapes (required, only per module).
+	// Redirects are not followed, so the token is only sent to it.
+	Endpoint string `yaml:"endpoint"`
+	// User is the PBS user the API token belongs to, e.g. "monitoring@pbs".
 	User string `yaml:"user"`
 	// TokenName is the name of the API token.
 	TokenName string `yaml:"token_name"`
-	// TokenValue is the secret of the API token.
+	// TokenValue is the secret of the API token. Either it or TokenValueFile
+	// is required.
 	TokenValue string `yaml:"token_value"`
-	// Endpoint is the PBS the module scrapes (required). The "target" URL
-	// parameter is ignored (like PBS_ENDPOINT) and redirects are not followed,
-	// so callers of the exporter can not send the token to any other server.
-	Endpoint string `yaml:"endpoint"`
+	// TokenValueFile is a file that holds the secret of the API token (e.g. a
+	// Docker or Kubernetes secret); it is read on start.
+	TokenValueFile string `yaml:"token_value_file"`
 	// Insecure disables TLS certificate verification.
-	Insecure bool `yaml:"insecure"`
-	// Timeout of requests to PBS (Go duration), defaults to defaultModuleTimeout.
-	Timeout string `yaml:"timeout"`
+	Insecure *bool `yaml:"insecure"`
+	// Timeout of each request to the PBS, defaults to defaultModuleTimeout.
+	Timeout *Duration `yaml:"timeout"`
 	// MaxConcurrency limits the concurrent requests to the PBS, defaults to
 	// defaultMaxConcurrency.
-	MaxConcurrency int `yaml:"max_concurrency"`
+	MaxConcurrency *int `yaml:"max_concurrency"`
 	// Collectors enables (true) or disables (false) collectors; collectors
 	// that are not listed keep their default.
 	Collectors map[string]bool `yaml:"collectors"`
-	// TaskLookback is how far back the task log is read (Go duration),
-	// defaults to defaultTaskLookback.
-	TaskLookback string `yaml:"task_lookback"`
+	// TaskLookback is how far back the task log is read, defaults to
+	// defaultTaskLookback.
+	TaskLookback *Duration `yaml:"task_lookback"`
 	// TaskLimit is the maximum number of tasks read from the task log,
 	// defaults to defaultTaskLimit.
-	TaskLimit int `yaml:"task_limit"`
+	TaskLimit *int `yaml:"task_limit"`
+}
+
+// Duration is a time.Duration written as Go duration ("15s", "192h").
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
+	var s string
+	if err := n.Decode(&s); err != nil {
+		return err
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("line %d: invalid duration %q", n.Line, s)
+	}
+	*d = Duration(v)
+	return nil
 }
 
 // Module is a validated ModuleConfig with a dedicated HTTP client, so that
@@ -74,34 +133,39 @@ type Module struct {
 	authorizationHeader string
 	client              *http.Client
 	maxConcurrency      int
-	// sem limits the concurrent requests of all scrapes of a module with a
-	// fixed endpoint; see NewExporter for modules without one.
+	// sem limits the concurrent requests of all scrapes of the module.
 	sem          *semaphore.Weighted
 	collectors   []*collector
 	taskLookback time.Duration
 	taskLimit    int
 }
 
-// Config is the content of the config file: module name -> module settings.
-type Config map[string]ModuleConfig
-
-// LoadConfig reads and parses a YAML config file.
-func LoadConfig(path string) (Config, error) {
+// LoadConfig reads the config file and builds its modules.
+func LoadConfig(path string) (*Config, map[string]*Module, error) {
 	// the path is logged, also as part of the read error
 	if hasControlChar(path) {
-		return nil, errors.New("config file path must not contain control characters")
+		return nil, nil, errors.New("config file path must not contain control characters")
 	}
-	// #nosec G304 G703 -- path is set by the operator via flag/env, not untrusted input
+	// #nosec G304 G703 -- path is set by the operator via flag, not untrusted input
 	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		return nil, fmt.Errorf("unable to read config file: %w", err)
+		return nil, nil, fmt.Errorf("unable to read config file: %w", err)
 	}
-	return ParseConfig(data)
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	modules, err := BuildModules(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, modules, nil
 }
 
-// ParseConfig parses the YAML content of a config file.
-func ParseConfig(data []byte) (Config, error) {
-	cfg := Config{}
+// ParseConfig parses and validates the YAML content of a config file and
+// merges the modules with the defaults.
+func ParseConfig(data []byte) (*Config, error) {
+	var cfg Config
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
@@ -123,64 +187,187 @@ func ParseConfig(data []byte) (Config, error) {
 	if hasNullModuleName(data) {
 		return nil, fmt.Errorf("invalid config file: module name must not be empty or null")
 	}
-	if len(cfg) == 0 {
-		return nil, fmt.Errorf("invalid config file: no modules specified")
-	}
+	return NewConfig(cfg.Server, cfg.Defaults, cfg.Modules)
+}
+
+// NewConfig validates the settings of a config file, fills in the server
+// defaults and merges every module with the defaults.
+func NewConfig(server ServerConfig, defaults ModuleConfig, modules map[string]ModuleConfig) (*Config, error) {
 	var invalid []string
-	for name, m := range cfg {
-		if name == "" {
-			invalid = append(invalid, "  - module name must not be empty")
+	add := func(format string, args ...any) {
+		invalid = append(invalid, "  - "+fmt.Sprintf(format, args...))
+	}
+
+	for _, msg := range validateServer(&server) {
+		add("server: %s", msg)
+	}
+
+	if defaults.Endpoint != "" {
+		add("defaults: endpoint must be set per module")
+	}
+	for _, msg := range validateModuleFields(defaults) {
+		add("defaults: %s", msg)
+	}
+
+	if len(modules) == 0 {
+		add("modules: no modules specified")
+	}
+	merged := map[string]ModuleConfig{}
+	for name, m := range modules {
+		switch {
+		case name == "":
+			add("module name must not be empty")
+			continue
+		case hasControlChar(name):
+			// module names are logged; the name itself is not part of the message
+			add("module name must not contain control characters")
 			continue
 		}
-		// module names are logged; the name itself is not part of the message
-		if hasControlChar(name) {
-			invalid = append(invalid, "  - module name must not contain control characters")
-			continue
+		for _, msg := range validateModuleFields(m) {
+			add("%s: %s", name, msg)
 		}
-		if m.User == "" || m.TokenName == "" || m.TokenValue == "" {
-			invalid = append(invalid, fmt.Sprintf("  - %s: user, token_name and token_value are required", name))
-		} else if hasControlChar(m.User) || hasControlChar(m.TokenName) || hasControlChar(m.TokenValue) {
-			invalid = append(invalid, fmt.Sprintf("  - %s: user, token_name and token_value must not contain control characters", name))
-		}
+		m = mergeModule(defaults, m)
 		if m.Endpoint == "" {
-			invalid = append(invalid, fmt.Sprintf("  - %s: endpoint is required", name))
+			add("%s: endpoint is required", name)
+		} else if endpoint, err := validateBaseURL(m.Endpoint); err != nil {
+			add("%s: endpoint %s", name, err)
 		} else {
-			endpoint, err := validateBaseURL(m.Endpoint)
-			if err != nil {
-				invalid = append(invalid, fmt.Sprintf("  - %s: endpoint %s", name, err))
-			}
 			m.Endpoint = endpoint
 		}
-		if m.Timeout != "" {
-			if d, err := time.ParseDuration(m.Timeout); err != nil {
-				invalid = append(invalid, fmt.Sprintf("  - %s: unable to parse timeout: %s", name, err))
-			} else if d <= 0 {
-				invalid = append(invalid, fmt.Sprintf("  - %s: timeout must be greater than 0", name))
-			}
+		if m.User == "" || m.TokenName == "" {
+			add("%s: user and token_name are required (in the module or in defaults)", name)
 		}
-		if m.MaxConcurrency < 0 {
-			invalid = append(invalid, fmt.Sprintf("  - %s: max_concurrency must be greater than 0", name))
+		if m.TokenValue == "" && m.TokenValueFile == "" {
+			add("%s: token_value or token_value_file is required (in the module or in defaults)", name)
 		}
-		if err := validateCollectors(m.Collectors); err != nil {
-			invalid = append(invalid, fmt.Sprintf("  - %s: collectors: %s", name, err))
-		}
-		if m.TaskLookback != "" {
-			if d, err := time.ParseDuration(m.TaskLookback); err != nil {
-				invalid = append(invalid, fmt.Sprintf("  - %s: unable to parse task_lookback: %s", name, err))
-			} else if d <= 0 {
-				invalid = append(invalid, fmt.Sprintf("  - %s: task_lookback must be greater than 0", name))
-			}
-		}
-		if m.TaskLimit < 0 {
-			invalid = append(invalid, fmt.Sprintf("  - %s: task_limit must be greater than 0", name))
-		}
-		cfg[name] = m
+		merged[name] = m
 	}
 	if len(invalid) > 0 {
 		sort.Strings(invalid)
-		return nil, fmt.Errorf("invalid module config entries in config file:\n%s", strings.Join(invalid, "\n"))
+		return nil, fmt.Errorf("invalid config file:\n%s", strings.Join(invalid, "\n"))
 	}
-	return cfg, nil
+	return &Config{Server: server, Defaults: defaults, Modules: merged}, nil
+}
+
+// validateServer checks the server settings and fills in their defaults.
+func validateServer(s *ServerConfig) []string {
+	var invalid []string
+	if s.ListenAddress == "" {
+		s.ListenAddress = defaultListenAddress
+	}
+	if s.MetricsPath == "" {
+		s.MetricsPath = defaultMetricsPath
+	} else if !strings.HasPrefix(s.MetricsPath, "/") || hasControlChar(s.MetricsPath) {
+		invalid = append(invalid, "metrics_path must be a path starting with /")
+	}
+	if s.LogLevel == "" {
+		s.LogLevel = defaultLogLevel
+	} else if _, err := parseLogLevel(s.LogLevel); err != nil {
+		invalid = append(invalid, "log_level must be debug, info, warn or error")
+	}
+	if s.ScrapeTimeout == nil {
+		s.ScrapeTimeout = ptr(Duration(defaultScrapeTimeout))
+	} else if *s.ScrapeTimeout <= 0 {
+		invalid = append(invalid, "scrape_timeout must be greater than 0")
+	}
+	if s.ScrapeTimeoutOffset == nil {
+		s.ScrapeTimeoutOffset = ptr(Duration(defaultScrapeTimeoutOffset))
+	} else if *s.ScrapeTimeoutOffset < 0 {
+		invalid = append(invalid, "scrape_timeout_offset must not be negative")
+	}
+	return invalid
+}
+
+// validateModuleFields checks the settings a module or the defaults set
+// themselves; required settings are checked after merging.
+func validateModuleFields(m ModuleConfig) []string {
+	var invalid []string
+	if hasControlChar(m.User) || hasControlChar(m.TokenName) || hasControlChar(m.TokenValue) {
+		invalid = append(invalid, "user, token_name and token_value must not contain control characters")
+	}
+	if m.TokenValue != "" && m.TokenValueFile != "" {
+		invalid = append(invalid, "only one of token_value and token_value_file may be set")
+	}
+	if hasControlChar(m.TokenValueFile) {
+		invalid = append(invalid, "token_value_file must not contain control characters")
+	}
+	if m.Timeout != nil && *m.Timeout <= 0 {
+		invalid = append(invalid, "timeout must be greater than 0")
+	}
+	if m.MaxConcurrency != nil && *m.MaxConcurrency <= 0 {
+		invalid = append(invalid, "max_concurrency must be greater than 0")
+	}
+	if m.TaskLookback != nil && *m.TaskLookback <= 0 {
+		invalid = append(invalid, "task_lookback must be greater than 0")
+	}
+	if m.TaskLimit != nil && *m.TaskLimit <= 0 {
+		invalid = append(invalid, "task_limit must be greater than 0")
+	}
+	if err := validateCollectors(m.Collectors); err != nil {
+		invalid = append(invalid, "collectors: "+err.Error())
+	}
+	return invalid
+}
+
+// mergeModule returns m with the settings it does not set taken from
+// defaults. The token is taken as a whole: a module that sets token_value or
+// token_value_file uses neither of the defaults.
+func mergeModule(defaults, m ModuleConfig) ModuleConfig {
+	if m.User == "" {
+		m.User = defaults.User
+	}
+	if m.TokenName == "" {
+		m.TokenName = defaults.TokenName
+	}
+	if m.TokenValue == "" && m.TokenValueFile == "" {
+		m.TokenValue, m.TokenValueFile = defaults.TokenValue, defaults.TokenValueFile
+	}
+	m.Insecure = orDefault(m.Insecure, defaults.Insecure)
+	m.Timeout = orDefault(m.Timeout, defaults.Timeout)
+	m.MaxConcurrency = orDefault(m.MaxConcurrency, defaults.MaxConcurrency)
+	m.TaskLookback = orDefault(m.TaskLookback, defaults.TaskLookback)
+	m.TaskLimit = orDefault(m.TaskLimit, defaults.TaskLimit)
+	if len(defaults.Collectors) > 0 {
+		collectors := map[string]bool{}
+		for name, on := range defaults.Collectors {
+			collectors[name] = on
+		}
+		for name, on := range m.Collectors {
+			collectors[name] = on
+		}
+		m.Collectors = collectors
+	}
+	return m
+}
+
+func orDefault[T any](v, d *T) *T {
+	if v != nil {
+		return v
+	}
+	return d
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+// readTokenFile reads the token secret from a file: its content without a
+// trailing line break.
+func readTokenFile(path string) (string, error) {
+	// #nosec G304 G703 -- path is set by the operator in the config file, not untrusted input
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	// the errors must not contain the content, it is a secret
+	switch {
+	case value == "":
+		return "", errors.New("the file is empty")
+	case hasControlChar(value):
+		return "", errors.New("the token must not contain control characters (other than one final line break)")
+	}
+	return value, nil
 }
 
 // isEmptyDocument reports whether n is a YAML document without content.
@@ -196,19 +383,25 @@ func isEmptyDocument(n *yaml.Node) bool {
 	return true
 }
 
-// hasNullModuleName reports whether the top-level mapping has a null key.
+// hasNullModuleName reports whether the modules mapping has a null key.
 func hasNullModuleName(data []byte) bool {
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil || len(root.Content) == 0 {
 		return false
 	}
-	m := root.Content[0]
-	if m.Kind != yaml.MappingNode {
+	top := root.Content[0]
+	if top.Kind != yaml.MappingNode {
 		return false
 	}
-	for i := 0; i < len(m.Content); i += 2 {
-		if k := m.Content[i]; k.Kind == yaml.ScalarNode && k.Tag == "!!null" {
-			return true
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value != "modules" || top.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+		modules := top.Content[i+1]
+		for j := 0; j < len(modules.Content); j += 2 {
+			if k := modules.Content[j]; k.Kind == yaml.ScalarNode && k.Tag == "!!null" {
+				return true
+			}
 		}
 	}
 	return false
@@ -246,112 +439,77 @@ func validateBaseURL(s string) (string, error) {
 	return strings.TrimSuffix(s, "/"), nil
 }
 
-// NewModule builds a Module. defaultTimeout is used when the module sets no timeout.
-func NewModule(name string, cfg ModuleConfig, defaultTimeout time.Duration) (*Module, error) {
-	timeout := defaultTimeout
-	if cfg.Timeout != "" {
-		d, err := time.ParseDuration(cfg.Timeout)
-		if err != nil {
-			return nil, fmt.Errorf("module %q: unable to parse timeout: %w", name, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("module %q: timeout must be greater than 0", name)
-		}
-		timeout = d
-	}
-	maxConcurrency := defaultMaxConcurrency
-	if cfg.MaxConcurrency < 0 {
-		return nil, fmt.Errorf("module %q: max_concurrency must be greater than 0", name)
-	} else if cfg.MaxConcurrency > 0 {
-		maxConcurrency = cfg.MaxConcurrency
-	}
-	if err := validateCollectors(cfg.Collectors); err != nil {
-		return nil, fmt.Errorf("module %q: collectors: %w", name, err)
-	}
-	taskLookback := defaultTaskLookback
-	if cfg.TaskLookback != "" {
-		d, err := time.ParseDuration(cfg.TaskLookback)
-		if err != nil {
-			return nil, fmt.Errorf("module %q: unable to parse task_lookback: %w", name, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("module %q: task_lookback must be greater than 0", name)
-		}
-		taskLookback = d
-	}
-	taskLimit := defaultTaskLimit
-	if cfg.TaskLimit < 0 {
-		return nil, fmt.Errorf("module %q: task_limit must be greater than 0", name)
-	} else if cfg.TaskLimit > 0 {
-		taskLimit = cfg.TaskLimit
-	}
-	// the default transport brings dial, TLS handshake and idle timeouts
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	// no proxy from the environment, as before
-	tr.Proxy = nil
-	// HTTP/1.1 as before: a custom TLS config disabled HTTP/2
-	tr.ForceAttemptHTTP2 = false
-	tr.TLSClientConfig = &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		// #nosec G402 -- opt-in per module, mirrors the existing PBS_INSECURE option
-		InsecureSkipVerify: cfg.Insecure,
-	}
-	tr.MaxIdleConnsPerHost = maxConcurrency
-	return &Module{
-		name:                name,
-		endpoint:            cfg.Endpoint,
-		authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
-		client:              &http.Client{Transport: tr, Timeout: timeout},
-		maxConcurrency:      maxConcurrency,
-		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
-		collectors:          enabledCollectors(cfg.Collectors),
-		taskLookback:        taskLookback,
-		taskLimit:           taskLimit,
-	}, nil
-}
-
-// BuildModules creates the modules of a config file (cfg) or, without a config
-// file, the legacy "default" module built from the flags/environment variables
-// (fallback). The two are not mixed: with a config file, fallback is nil.
-func BuildModules(cfg Config, fallback *ModuleConfig, defaultTimeout time.Duration) (map[string]*Module, error) {
+// BuildModules reads the token files and builds the modules of a parsed
+// config.
+func BuildModules(cfg *Config) (map[string]*Module, error) {
 	modules := map[string]*Module{}
-	for name, mc := range cfg {
-		// without a pinned endpoint the "target" URL parameter would decide
-		// where the module's token is sent
-		if mc.Endpoint == "" {
-			return nil, fmt.Errorf("module %q: endpoint is required", name)
+	var invalid []string
+	for name, mc := range cfg.Modules {
+		if mc.TokenValueFile != "" {
+			value, err := readTokenFile(mc.TokenValueFile)
+			if err != nil {
+				invalid = append(invalid, fmt.Sprintf("  - %s: token_value_file: %s", name, err))
+				continue
+			}
+			mc.TokenValue = value
 		}
-		m, err := NewModule(name, mc, defaultTimeout)
-		if err != nil {
-			return nil, err
-		}
-		// do not follow redirects, so the token is never sent to another host
-		m.client.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		modules[name] = m
+		modules[name] = NewModule(name, mc)
 	}
-	if _, ok := modules[defaultModuleName]; !ok && fallback != nil {
-		m, err := NewModule(defaultModuleName, *fallback, defaultTimeout)
-		if err != nil {
-			return nil, err
-		}
-		modules[defaultModuleName] = m
+	if len(invalid) > 0 {
+		sort.Strings(invalid)
+		return nil, fmt.Errorf("invalid config file:\n%s", strings.Join(invalid, "\n"))
 	}
 	return modules, nil
 }
 
-// LoadModules loads the config file and builds its modules. Flags and
-// environment variables for the connection (pbs.endpoint, pbs.username,
-// pbs.api.token, pbs.api.token.name, pbs.insecure, pbs.timeout) are not used.
-func LoadModules(path string) (Config, map[string]*Module, error) {
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		return nil, nil, err
+// NewModule builds a Module from a validated module config with its token.
+func NewModule(name string, cfg ModuleConfig) *Module {
+	timeout := durationOr(cfg.Timeout, defaultModuleTimeout)
+	maxConcurrency := intOr(cfg.MaxConcurrency, defaultMaxConcurrency)
+
+	// the default transport brings dial, TLS handshake and idle timeouts
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// no proxy from the environment
+	tr.Proxy = nil
+	// HTTP/1.1: a custom TLS config disabled HTTP/2 before, keep it that way
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		// #nosec G402 -- opt-in per module
+		InsecureSkipVerify: cfg.Insecure != nil && *cfg.Insecure,
 	}
-	modules, err := BuildModules(cfg, nil, defaultModuleTimeout)
-	if err != nil {
-		return nil, nil, err
+	tr.MaxIdleConnsPerHost = maxConcurrency
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+		// do not follow redirects, so the token is never sent to another host
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
-	return cfg, modules, nil
+	return &Module{
+		name:                name,
+		endpoint:            cfg.Endpoint,
+		authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
+		client:              client,
+		maxConcurrency:      maxConcurrency,
+		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
+		collectors:          enabledCollectors(cfg.Collectors),
+		taskLookback:        durationOr(cfg.TaskLookback, defaultTaskLookback),
+		taskLimit:           intOr(cfg.TaskLimit, defaultTaskLimit),
+	}
+}
+
+func durationOr(v *Duration, d time.Duration) time.Duration {
+	if v != nil {
+		return time.Duration(*v)
+	}
+	return d
+}
+
+func intOr(v *int, d int) int {
+	if v != nil {
+		return *v
+	}
+	return d
 }

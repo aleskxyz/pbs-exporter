@@ -1,0 +1,57 @@
+# Example configuration of pbs-exporter. Start the exporter with
+#   pbs-exporter -config.file /etc/pbs-exporter/config.yml
+# (that path is also the default).
+#
+# The file holds API token secrets (unless every module uses
+# token_value_file): make it readable for the exporter's user only, e.g.
+#   chmod 600 /etc/pbs-exporter/config.yml
+
+# Settings of the exporter's HTTP server; all optional, the values below are
+# the defaults.
+server:
+  listen_address: ":10019"
+  metrics_path: /metrics
+  log_level: info            # debug, info, warn or error
+  # Each scrape stops after the timeout Prometheus sends
+  # (X-Prometheus-Scrape-Timeout-Seconds) minus scrape_timeout_offset, or
+  # after scrape_timeout for clients that send none.
+  scrape_timeout: 30s
+  scrape_timeout_offset: 500ms
+
+# Settings every module inherits unless it sets them itself. Everything a
+# module can set is allowed here, except endpoint.
+defaults:
+  user: monitoring@pbs       # PBS user the API token belongs to
+  token_name: exporter       # name of the API token
+  timeout: 15s               # timeout of each request to the PBS (default 5s)
+  # insecure: false          # true skips TLS certificate verification
+  # max_concurrency: 4       # concurrent requests to one PBS
+  # task_lookback: 192h      # how far back the task log is read
+  # task_limit: 10000        # maximum number of tasks read from the task log
+  # Collectors are switched on (true) or off (false); unlisted collectors keep
+  # their default. On by default: version (can not be switched off), node,
+  # datastores, snapshots, groups, jobs, sync, tasks, zfs, time, apt.
+  # Off by default: access, disks.
+  collectors:
+    access: true
+
+# One module per Proxmox Backup Server, selected per scrape with
+# /metrics?module=<name>; a scrape without "module" uses the module "default".
+# A module merges its collectors with those of the defaults; any other setting
+# replaces the default.
+modules:
+  default:
+    endpoint: https://pbs.example.org:8007   # required, base URL of the PBS
+    # The secret of the API token: either token_value, or token_value_file
+    # with a file that holds it (e.g. a Docker or Kubernetes secret). The file
+    # is read on start; restart the exporter after rotating the token.
+    token_value_file: /run/secrets/pbs-exporter-token
+
+  site-b:
+    endpoint: https://10.10.10.11:8007
+    user: monitoring@pbs
+    token_name: site-b
+    token_value: 00000000-0000-0000-0000-000000000000
+    insecure: true           # self-signed certificate
+    collectors:
+      disks: true            # SMART status and SSD wear

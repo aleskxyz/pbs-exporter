@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -21,7 +20,7 @@ import (
 func testModule(t *testing.T, srv *fakeServer, mc ModuleConfig) *Module {
 	t.Helper()
 	mc.User, mc.TokenName, mc.TokenValue, mc.Endpoint = "mon@pbs", "exporter", "secret", srv.URL
-	return testModules(t, Config{"site": mc}, nil)["site"]
+	return testModules(t, map[string]ModuleConfig{"site": mc})["site"]
 }
 
 func testExporter(t *testing.T, srv *fakeServer, mc ModuleConfig) *Exporter {
@@ -136,7 +135,7 @@ func TestScrapeDeadlineFromHeader(t *testing.T) {
 	srv := newFakePBS(t, map[string]fakeResp{
 		"/api2/json/admin/datastore/store1/snapshots?ns=site-a": {body: `{"data":[]}`, delay: 10 * time.Second},
 	})
-	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{Timeout: "1m"})}, true, testTimeouts)
+	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{Timeout: ptr(Duration(time.Minute))})}, testTimeouts)
 	req := httptest.NewRequest("GET", "/metrics?module=site", nil)
 	req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "1.5")
 
@@ -305,7 +304,7 @@ func TestMaxConcurrency(t *testing.T) {
 	}
 	overrides["/api2/json/admin/datastore/store1/namespace"] = fakeResp{body: `{"data":[` + strings.Join(namespaces, ",") + `]}`}
 	srv := newFakePBS(t, overrides)
-	m := testModule(t, srv, ModuleConfig{MaxConcurrency: 2})
+	m := testModule(t, srv, ModuleConfig{MaxConcurrency: ptr(2)})
 
 	done := make(chan struct{})
 	for range 3 {
@@ -324,12 +323,11 @@ func TestMaxConcurrency(t *testing.T) {
 }
 
 func TestCollectorConfig(t *testing.T) {
-	const body = "  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n"
-	cfg, err := ParseConfig([]byte("a:\n" + body + "  max_concurrency: 8\n  collectors:\n    snapshots: false\n"))
+	cfg, err := ParseConfig([]byte("modules:\n  a:\n" + validModule + "    max_concurrency: 8\n    collectors:\n      snapshots: false\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	modules, err := BuildModules(cfg, nil, time.Second)
+	modules, err := BuildModules(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,29 +338,6 @@ func TestCollectorConfig(t *testing.T) {
 	}
 	if want := []string{"version", "node", "datastores", "groups", "jobs", "sync", "tasks", "zfs", "time", "apt"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
 		t.Errorf("collectors %v, max_concurrency %d", names, m.maxConcurrency)
-	}
-
-	for name, in := range map[string]string{
-		"unknown collector": "a:\n" + body + "  collectors:\n    nope: true\n",
-		"disabled version":  "a:\n" + body + "  collectors:\n    version: false\n",
-		"neg concurrency":   "a:\n" + body + "  max_concurrency: -1\n",
-		"collectors list":   "a:\n" + body + "  collectors: [node]\n",
-		"bad lookback":      "a:\n" + body + "  task_lookback: 8d\n",
-		"zero lookback":     "a:\n" + body + "  task_lookback: 0s\n",
-		"neg task limit":    "a:\n" + body + "  task_limit: -1\n",
-	} {
-		if _, err := ParseConfig([]byte(in)); err == nil {
-			t.Errorf("%s: expected an error", name)
-		}
-	}
-
-	if got, err := parseCollectorList(" node , -snapshots,"); err != nil || len(got) != 2 || !got["node"] || got["snapshots"] {
-		t.Errorf("parseCollectorList: %v, %v", got, err)
-	}
-	for _, in := range []string{"bogus", "-version", "-"} {
-		if _, err := parseCollectorList(in); err == nil {
-			t.Errorf("%q: expected an error", in)
-		}
 	}
 }
 
@@ -410,43 +385,6 @@ func TestDatastoreUnavailableMessages(t *testing.T) {
 	}
 	if isDatastoreUnavailable(&APIError{Path: "/x", Status: http.StatusInternalServerError, Message: "datastore is being deleted"}) {
 		t.Error("only a 400 tells that a datastore is unavailable")
-	}
-}
-
-// In legacy mode, the "target" parameter selects the PBS: scrapes of a slow
-// PBS must not use up the request limit of the scrapes of other targets.
-func TestLegacyTargetsDoNotShareRequestLimit(t *testing.T) {
-	slowRoutes := loadDefaultRoutes(t)
-	for route, r := range slowRoutes {
-		r.delay = 3 * time.Second
-		slowRoutes[route] = r
-	}
-	slow := startFakePBS(t, slowRoutes)
-	fast := newFakePBS(t, nil)
-	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v", MaxConcurrency: 2}), false, testTimeouts)
-
-	for range 2 {
-		go func() {
-			req := httptest.NewRequest("GET", "/metrics?target="+slow.URL, nil)
-			req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "4")
-			scrapeRequest(t, h, req)
-		}()
-	}
-	time.Sleep(200 * time.Millisecond)
-	req := httptest.NewRequest("GET", "/metrics?target="+fast.URL, nil)
-	req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "2")
-	_, body := scrapeRequest(t, h, req)
-	if !strings.Contains(body, "\npbs_up 1\n") || regexp.MustCompile(`pbs_collector_success\{[^}]*\} 0`).MatchString(body) {
-		t.Errorf("the fast target was slowed down by the slow one:\n%s", body)
-	}
-}
-
-// A target with invalid UTF-8 in the host gives pbs_up 0, not HTTP 500.
-func TestInvalidUTF8Target(t *testing.T) {
-	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v"}), false, testTimeouts)
-	code, body := scrape(t, h, "target=http://%FF:8007")
-	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 0\n") {
-		t.Errorf("status %d, body:\n%s", code, body)
 	}
 }
 

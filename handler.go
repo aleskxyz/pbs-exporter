@@ -66,38 +66,24 @@ func (gatherErrorLog) Println(v ...any) {
 	slog.Error("gathering metrics", "err", sanitize(fmt.Sprint(v...)))
 }
 
-// newMetricsHandler returns the /metrics handler. With a config file
-// (configMode), each request selects a module with the "module" URL parameter
-// (default "default") and scrapes the module's endpoint. Without one, the
-// "module" parameter is ignored, as it was before modules existed, the
-// "default" module is always used, and unless pbs.endpoint pins it, the Proxmox
-// Backup Server to scrape is taken from the "target" URL parameter.
+// newMetricsHandler returns the /metrics handler. Each request selects a
+// module with the "module" URL parameter (default "default") and scrapes the
+// module's endpoint; other parameters, like "target", are ignored.
 //
 // Every request gets its own registry, so concurrent scrapes of different
-// targets can not see each other's metrics.
-func newMetricsHandler(modules map[string]*Module, configMode bool, timeouts scrapeTimeouts) http.Handler {
+// modules can not see each other's metrics.
+func newMetricsHandler(modules map[string]*Module, timeouts scrapeTimeouts) http.Handler {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		moduleName := defaultModuleName
-		if configMode && r.URL.Query().Get("module") != "" {
-			moduleName = r.URL.Query().Get("module")
+		moduleName := r.URL.Query().Get("module")
+		if moduleName == "" {
+			moduleName = defaultModuleName
 		}
 		module, ok := modules[moduleName]
 		if !ok {
 			http.Error(w, "Module not found in config", http.StatusBadRequest)
 			return
 		}
-
-		// a module with a fixed endpoint (always the case for config file
-		// modules) ignores the "target" parameter, otherwise it is taken from
-		// the "target" query parameter
 		target := module.endpoint
-		if target == "" {
-			target = r.URL.Query().Get("target")
-			if target == "" {
-				// if target is not set, we use the default
-				target = "http://localhost:8007"
-			}
-		}
 
 		timeout := timeouts.scrapeTimeout(r)
 		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(target), "timeout", timeout)

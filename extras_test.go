@@ -195,7 +195,7 @@ pbs_disk_wearout_ratio{disk="sda"} 0.03
 `, "pbs_user_info", "pbs_user_expiry_timestamp_seconds", "pbs_token_expiry_timestamp_seconds", "pbs_reader_tasks",
 		"pbs_disk_smart_status", "pbs_disk_wearout_ratio")
 
-	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{Collectors: map[string]bool{"access": true}})}, true, testTimeouts)
+	h := newMetricsHandler(map[string]*Module{"site": testModule(t, srv, ModuleConfig{Collectors: map[string]bool{"access": true}})}, testTimeouts)
 	code, body := scrape(t, h, "module=site")
 	if code != http.StatusOK || strings.Contains(body, "hunter2") || strings.Contains(body, "token secret") {
 		t.Errorf("status %d, or a comment was exported:\n%s", code, body)

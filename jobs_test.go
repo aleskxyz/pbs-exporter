@@ -182,7 +182,7 @@ func TestTaskLogQuery(t *testing.T) {
 		"/api2/json/nodes/localhost/tasks?limit=2&running=1": {body: `{"data":[]}`},
 	})
 	start := time.Now()
-	e := testExporter(t, srv, ModuleConfig{TaskLookback: "48h", TaskLimit: 2})
+	e := testExporter(t, srv, ModuleConfig{TaskLookback: ptr(Duration(48 * time.Hour)), TaskLimit: ptr(2)})
 	if n := testutil.CollectAndCount(e, "pbs_job_last_run_success"); n == 0 {
 		t.Fatal("no sync jobs from the task log")
 	}
