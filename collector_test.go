@@ -47,12 +47,12 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-var allOK = map[string]float64{"datastores": 1, "node": 1, "snapshots": 1, "version": 1}
+var allOK = map[string]float64{"datastores": 1, "groups": 1, "node": 1, "snapshots": 1, "version": 1}
 
 func collectorStatus(collectors map[string]float64) string {
 	var b strings.Builder
 	b.WriteString("# HELP pbs_collector_success Whether a collector succeeded in the last scrape.\n# TYPE pbs_collector_success gauge\n")
-	for _, name := range []string{"datastores", "node", "snapshots", "version"} {
+	for _, name := range []string{"datastores", "groups", "node", "snapshots", "version"} {
 		if v, ok := collectors[name]; ok {
 			fmt.Fprintf(&b, "pbs_collector_success{collector=%q} %g\n", name, v)
 		}
@@ -73,34 +73,24 @@ pbs_info{endpoint_host="127.0.0.1",module="site"} 1
 # HELP pbs_version Version of the PBS installation.
 # TYPE pbs_version gauge
 pbs_version{release="2",repoid="0123abcd",version="4.2"} 1
-# HELP pbs_available The available bytes of the underlying storage.
-# TYPE pbs_available gauge
-pbs_available{datastore="store1"} 1000
-# HELP pbs_used The used bytes of the underlying storage.
-# TYPE pbs_used gauge
-pbs_used{datastore="store1"} 2000
-# HELP pbs_snapshot_count The total number of backups.
+# HELP pbs_datastore_available_bytes The available bytes of the underlying storage of the datastore.
+# TYPE pbs_datastore_available_bytes gauge
+pbs_datastore_available_bytes{datastore="store1"} 1000
+# HELP pbs_datastore_used_bytes The used bytes of the underlying storage of the datastore.
+# TYPE pbs_datastore_used_bytes gauge
+pbs_datastore_used_bytes{datastore="store1"} 2000
+# HELP pbs_snapshot_count The total number of backups of a namespace.
 # TYPE pbs_snapshot_count gauge
-pbs_snapshot_count{datastore="store1",namespace=""} 3
-pbs_snapshot_count{datastore="store1",namespace="site-a"} 1
-# HELP pbs_snapshot_vm_last_timestamp The timestamp of the last backup of a VM.
-# TYPE pbs_snapshot_vm_last_timestamp gauge
-pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="",vm_id="100",vm_name="web"} 1700086400
-pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="",vm_id="101",vm_name="db"} 1700000000
-pbs_snapshot_vm_last_timestamp{datastore="store1",namespace="site-a",vm_id="200",vm_name="app"} 1700000000
-# HELP pbs_snapshot_vm_last_verify The verify status of the last backup of a VM.
-# TYPE pbs_snapshot_vm_last_verify gauge
-pbs_snapshot_vm_last_verify{datastore="store1",namespace="",vm_id="100",vm_name="web"} 0
-pbs_snapshot_vm_last_verify{datastore="store1",namespace="",vm_id="101",vm_name="db"} 1
-pbs_snapshot_vm_last_verify{datastore="store1",namespace="site-a",vm_id="200",vm_name="app"} 0
+pbs_snapshot_count{datastore="store1",namespace_root="",pbs_namespace=""} 3
+pbs_snapshot_count{datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1
 # HELP pbs_host_load15 The load for 15 minutes of the host.
 # TYPE pbs_host_load15 gauge
 pbs_host_load15 0.125
 # HELP pbs_host_subscription_due_timestamp_seconds The subscription next due timestamp (unix seconds) of the host.
 # TYPE pbs_host_subscription_due_timestamp_seconds gauge
 pbs_host_subscription_due_timestamp_seconds{productname="Proxmox Backup Server Basic"} 1893456000
-`, "pbs_collector_success", "pbs_up", "pbs_info", "pbs_version", "pbs_available", "pbs_used", "pbs_snapshot_count",
-		"pbs_snapshot_vm_last_timestamp", "pbs_snapshot_vm_last_verify", "pbs_host_load15", "pbs_host_subscription_due_timestamp_seconds")
+`, "pbs_collector_success", "pbs_up", "pbs_info", "pbs_version", "pbs_datastore_available_bytes", "pbs_datastore_used_bytes",
+		"pbs_snapshot_count", "pbs_host_load15", "pbs_host_subscription_due_timestamp_seconds")
 }
 
 // A failing endpoint only fails its own collector.
@@ -110,14 +100,14 @@ func TestCollectorFailureIsIsolated(t *testing.T) {
 		"/api2/json/nodes/localhost/status": {status: http.StatusInternalServerError, body: `{"data":null,"message":"boom"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 0, "snapshots": 1, "version": 1})+`
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "groups": 1, "node": 0, "snapshots": 1, "version": 1})+`
 # HELP pbs_up Was the last query of PBS successful (the version call).
 # TYPE pbs_up gauge
 pbs_up 1
-# HELP pbs_available The available bytes of the underlying storage.
-# TYPE pbs_available gauge
-pbs_available{datastore="store1"} 1000
-`, "pbs_collector_success", "pbs_up", "pbs_available", "pbs_host_cpu_usage")
+# HELP pbs_datastore_available_bytes The available bytes of the underlying storage of the datastore.
+# TYPE pbs_datastore_available_bytes gauge
+pbs_datastore_available_bytes{datastore="store1"} 1000
+`, "pbs_collector_success", "pbs_up", "pbs_datastore_available_bytes", "pbs_host_cpu_usage_ratio")
 	// the subscription of the same collector is still exported
 	if n := testutil.CollectAndCount(e, "pbs_host_subscription_info"); n != 1 {
 		t.Errorf("pbs_host_subscription_info: %d series, want 1", n)
@@ -133,7 +123,7 @@ func TestForbiddenNamesPrivilege(t *testing.T) {
 		"/api2/json/admin/datastore/store1/namespace": {status: http.StatusForbidden, body: `{"data":null,"message":"permission check failed"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "snapshots": 0, "version": 1}), "pbs_collector_success")
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "groups": 0, "node": 1, "snapshots": 0, "version": 1}), "pbs_collector_success")
 	if !strings.Contains(logs.String(), `required_privilege="Datastore.Audit on /datastore"`) {
 		t.Errorf("the log does not name the privilege:\n%s", logs)
 	}
@@ -161,7 +151,8 @@ func TestScrapeDeadlineFromHeader(t *testing.T) {
 		"\npbs_up 1\n",
 		`pbs_collector_success{collector="snapshots"} 0`,
 		`pbs_collector_success{collector="datastores"} 1`,
-		`pbs_snapshot_count{datastore="store1",namespace=""} 3`,
+		`pbs_collector_success{collector="groups"} 0`,
+		`pbs_snapshot_count{datastore="store1",namespace_root="",pbs_namespace=""} 3`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in:\n%s", want, body)
@@ -217,9 +208,9 @@ func TestRequestEscaping(t *testing.T) {
 	})
 	e := testExporter(t, srv, ModuleConfig{})
 	compare(t, e, `
-# HELP pbs_snapshot_count The total number of backups.
+# HELP pbs_snapshot_count The total number of backups of a namespace.
 # TYPE pbs_snapshot_count gauge
-pbs_snapshot_count{datastore="st&1 x",namespace="a/b&c=d"} 1
+pbs_snapshot_count{datastore="st&1 x",namespace_root="a",pbs_namespace="a/b&c=d"} 1
 `, "pbs_snapshot_count")
 }
 
@@ -252,6 +243,7 @@ func TestDatastoreAvailability(t *testing.T) {
 			{"store":"gone"}]}`},
 		"/api2/json/admin/datastore/ro/namespace":     {body: `{"data":[{"ns":""}]}`},
 		"/api2/json/admin/datastore/ro/snapshots?ns=": {body: `{"data":[]}`},
+		"/api2/json/admin/datastore/ro/groups?ns=":    {body: `{"data":[]}`},
 		"/api2/json/admin/datastore/gone/namespace":   {status: http.StatusBadRequest, body: `{"data":null,"message":"datastore is being deleted"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
@@ -268,8 +260,8 @@ func TestDatastoreAvailability(t *testing.T) {
 		t.Errorf("scanned datastores %v, want %v", scanned, want)
 	}
 	// PBS reports no usage for these datastores: no series instead of 0 bytes
-	if n := testutil.CollectAndCount(e, "pbs_size"); n != 0 {
-		t.Errorf("pbs_size: %d series, want none", n)
+	if n := testutil.CollectAndCount(e, "pbs_datastore_size_bytes"); n != 0 {
+		t.Errorf("pbs_datastore_size_bytes: %d series, want none", n)
 	}
 }
 
@@ -292,10 +284,10 @@ func TestMaintenanceType(t *testing.T) {
 
 func TestDisabledCollector(t *testing.T) {
 	srv := newFakePBS(t, nil)
-	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false}})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
 	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "version": 1}), "pbs_collector_success")
 	for _, r := range srv.Requests() {
-		if strings.Contains(r, "/namespace") || strings.Contains(r, "/snapshots") {
+		if strings.Contains(r, "/namespace") || strings.Contains(r, "/snapshots") || strings.Contains(r, "/groups") {
 			t.Errorf("disabled collector made request %s", r)
 		}
 	}
@@ -345,7 +337,7 @@ func TestCollectorConfig(t *testing.T) {
 	for _, c := range m.collectors {
 		names = append(names, c.name)
 	}
-	if want := []string{"version", "node", "datastores"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
+	if want := []string{"version", "node", "datastores", "groups"}; !slices.Equal(names, want) || m.maxConcurrency != 8 {
 		t.Errorf("collectors %v, max_concurrency %d", names, m.maxConcurrency)
 	}
 
@@ -467,10 +459,10 @@ func TestDatastoreWithoutUsage(t *testing.T) {
 	})
 	e := testExporter(t, srv, ModuleConfig{})
 	compare(t, e, `
-# HELP pbs_size The size of the underlying storage in bytes.
-# TYPE pbs_size gauge
-pbs_size{datastore="store1"} 3000
-`, "pbs_size")
+# HELP pbs_datastore_size_bytes The size of the underlying storage of the datastore in bytes.
+# TYPE pbs_datastore_size_bytes gauge
+pbs_datastore_size_bytes{datastore="store1"} 3000
+`, "pbs_datastore_size_bytes")
 	compare(t, e, collectorStatus(allOK), "pbs_collector_success")
 }
 
@@ -501,7 +493,9 @@ func TestNamespaceErrors(t *testing.T) {
 	})
 	logs := captureLogs(t)
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "snapshots": 0, "version": 1}), "pbs_collector_success")
+	if n := testutil.CollectAndCount(e, "pbs_snapshot_count"); n != 0 {
+		t.Errorf("pbs_snapshot_count: %d series, want none", n)
+	}
 	if !strings.Contains(logs.String(), `datastore store1, namespace \"site-a\"`) {
 		t.Errorf("the error does not name the namespace:\n%s", logs)
 	}

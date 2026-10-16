@@ -12,18 +12,18 @@ import (
 
 var (
 	available = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "available"),
-		"The available bytes of the underlying storage.",
+		prometheus.BuildFQName(promNamespace, "datastore", "available_bytes"),
+		"The available bytes of the underlying storage of the datastore.",
 		[]string{"datastore"}, nil,
 	)
 	size = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "size"),
-		"The size of the underlying storage in bytes.",
+		prometheus.BuildFQName(promNamespace, "datastore", "size_bytes"),
+		"The size of the underlying storage of the datastore in bytes.",
 		[]string{"datastore"}, nil,
 	)
 	used = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "used"),
-		"The used bytes of the underlying storage.",
+		prometheus.BuildFQName(promNamespace, "datastore", "used_bytes"),
+		"The used bytes of the underlying storage of the datastore.",
 		[]string{"datastore"}, nil,
 	)
 )

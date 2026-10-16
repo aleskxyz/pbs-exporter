@@ -29,6 +29,8 @@ var defaultRoutes = map[string]string{
 	"/api2/json/admin/datastore/store1/namespace":           "namespace.json",
 	"/api2/json/admin/datastore/store1/snapshots?ns=":       "snapshots-root.json",
 	"/api2/json/admin/datastore/store1/snapshots?ns=site-a": "snapshots-site-a.json",
+	"/api2/json/admin/datastore/store1/groups?ns=":          "groups-root.json",
+	"/api2/json/admin/datastore/store1/groups?ns=site-a":    "groups-site-a.json",
 	"/api2/json/nodes/localhost/status":                     "node-status.json",
 	"/api2/json/nodes/localhost/subscription":               "subscription.json",
 }

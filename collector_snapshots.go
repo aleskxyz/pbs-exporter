@@ -10,27 +10,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var (
-	snapshot_count = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_count"),
-		"The total number of backups.",
-		[]string{"datastore", "namespace"}, nil,
-	)
-	snapshot_vm_count = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_count"),
-		"The total number of backups per VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
-	snapshot_vm_last_timestamp = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_last_timestamp"),
-		"The timestamp of the last backup of a VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
-	snapshot_vm_last_verify = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "snapshot_vm_last_verify"),
-		"The verify status of the last backup of a VM.",
-		[]string{"datastore", "namespace", "vm_id", "vm_name"}, nil,
-	)
+var snapshotCount = prometheus.NewDesc(
+	prometheus.BuildFQName(promNamespace, "", "snapshot_count"),
+	"The total number of backups of a namespace.",
+	[]string{"datastore", "pbs_namespace", "namespace_root"}, nil,
 )
 
 type namespaceItem struct {
@@ -97,73 +80,15 @@ var snapshotsCollector = &collector{
 	name:      "snapshots",
 	enabled:   true,
 	privilege: "Datastore.Audit on /datastore",
-	descs:     []*prometheus.Desc{snapshot_count, snapshot_vm_count, snapshot_vm_last_timestamp, snapshot_vm_last_verify},
+	descs:     []*prometheus.Desc{snapshotCount},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		return s.forEachNamespace(ctx, func(store, ns string) error {
 			snapshots, err := s.getSnapshots(ctx, store, ns)
 			if err != nil {
 				return err
 			}
-			return collectSnapshotMetrics(store, ns, snapshots, ch)
+			ch <- prometheus.MustNewConstMetric(snapshotCount, prometheus.GaugeValue, float64(len(snapshots)), store, ns, namespaceRoot(ns))
+			return nil
 		})
 	},
-}
-
-func collectSnapshotMetrics(datastore, namespace string, snapshots []snapshotItem, ch chan<- prometheus.Metric) error {
-	ch <- prometheus.MustNewConstMetric(
-		snapshot_count, prometheus.GaugeValue, float64(len(snapshots)), datastore, namespace,
-	)
-
-	// set snapshot metrics per vm
-	vmNameMapping := make(map[string]string)
-	vmCount := make(map[string]int)
-	for _, snapshot := range snapshots {
-		vmID := snapshot.BackupID
-		vmNameMapping[vmID] = snapshot.Comment
-		vmCount[vmID]++
-	}
-
-	for vmID, count := range vmCount {
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_count, prometheus.GaugeValue, float64(count), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-
-		lastTimeStamp, lastVerify, err := findLastSnapshotWithBackupID(snapshots, vmID)
-		if err != nil {
-			return err
-		}
-		lastVerifyBool := 0
-		if lastVerify == "ok" {
-			lastVerifyBool = 1
-		}
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_last_timestamp, prometheus.GaugeValue, float64(lastTimeStamp), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-		ch <- prometheus.MustNewConstMetric(
-			snapshot_vm_last_verify, prometheus.GaugeValue, float64(lastVerifyBool), datastore, namespace, vmID, vmNameMapping[vmID],
-		)
-	}
-
-	return nil
-}
-
-func findLastSnapshotWithBackupID(snapshots []snapshotItem, backupID string) (int64, string, error) {
-	// find biggest value of backupTime of backupID in response array
-	var lastTimeStamp int64
-	var lastVerify string
-	for _, snapshot := range snapshots {
-		if snapshot.BackupID == backupID {
-			if snapshot.BackupTime > lastTimeStamp {
-				lastTimeStamp = snapshot.BackupTime
-				lastVerify = snapshot.Verification.State
-			}
-		}
-	}
-
-	// if lastTimeStamp is still 0, no snapshot was found
-	if lastTimeStamp != 0 {
-		return lastTimeStamp, lastVerify, nil
-	}
-
-	return 0, "", fmt.Errorf("no snapshot found with backup ID %s", backupID)
 }

@@ -44,6 +44,7 @@ func allCollectors() []*collector {
 		nodeCollector,
 		datastoresCollector,
 		snapshotsCollector,
+		groupsCollector,
 	}
 }
 

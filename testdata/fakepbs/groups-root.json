@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"backup-type": "vm", "backup-id": "100", "backup-count": 2, "last-backup": 1700086400, "owner": "pve@pbs!backup", "files": ["index.json.blob", "drive-scsi0.img.fidx"]},
+    {"backup-type": "ct", "backup-id": "100", "backup-count": 1, "last-backup": 1700000000, "owner": "pve@pbs!backup", "files": ["index.json.blob", "root.pxar.didx"]},
+    {"backup-type": "host", "backup-id": "benchmark", "backup-count": 0, "last-backup": 0, "owner": "root@pam"}
+  ]
+}
