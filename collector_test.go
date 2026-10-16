@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -174,7 +175,8 @@ func TestScrapeTimeout(t *testing.T) {
 		"":      30 * time.Second,
 		"10":    9500 * time.Millisecond,
 		"2.5":   2 * time.Second,
-		"0.4":   400 * time.Millisecond, // shorter than the offset: not reduced
+		"0.4":   200 * time.Millisecond, // shorter than the offset: halved
+		"1e-12": 30 * time.Second,       // rounds to 0
 		"0":     30 * time.Second,
 		"-1":    30 * time.Second,
 		"NaN":   30 * time.Second,
@@ -273,11 +275,14 @@ func TestDatastoreAvailability(t *testing.T) {
 
 func TestMaintenanceType(t *testing.T) {
 	for in, want := range map[string]string{
-		"type=offline,message=x":   "offline",
-		"message=x,type=read-only": "read-only",
-		"offline":                  "offline",
-		"offline,message=x":        "offline",
-		"":                         "",
+		"type=offline,message=x":        "offline",
+		`message="a, b",type=read-only`: "read-only",
+		`message="x, y"`:                "",
+		`offline,message="a,b"`:         "offline",
+		"message=x,type=read-only":      "read-only",
+		"offline":                       "offline",
+		"offline,message=x":             "offline",
+		"":                              "",
 	} {
 		if got := maintenanceType(in); got != want {
 			t.Errorf("%q: got %q, want %q", in, got, want)
@@ -390,5 +395,60 @@ func TestAPIError(t *testing.T) {
 	}
 	if got, want := err.Error(), "wrapped: /api2/json/version: HTTP 403: permission check failed"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDatastoreUnavailableMessages(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"datastore is being deleted":               true,
+		"datastore is being unmounted":             true,
+		"datastore is in offline maintenance mode": true,
+		"datastore 'usb' is not mounted":           true,
+		"permission check failed":                  false,
+	} {
+		err := &APIError{Path: "/x", Status: http.StatusBadRequest, Message: msg}
+		if got := isDatastoreUnavailable(err); got != want {
+			t.Errorf("%q: got %t, want %t", msg, got, want)
+		}
+	}
+	if isDatastoreUnavailable(&APIError{Path: "/x", Status: http.StatusInternalServerError, Message: "datastore is being deleted"}) {
+		t.Error("only a 400 tells that a datastore is unavailable")
+	}
+}
+
+// In legacy mode, the "target" parameter selects the PBS: scrapes of a slow
+// PBS must not use up the request limit of the scrapes of other targets.
+func TestLegacyTargetsDoNotShareRequestLimit(t *testing.T) {
+	slowRoutes := loadDefaultRoutes(t)
+	for route, r := range slowRoutes {
+		r.delay = 3 * time.Second
+		slowRoutes[route] = r
+	}
+	slow := startFakePBS(t, slowRoutes)
+	fast := newFakePBS(t, nil)
+	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v", MaxConcurrency: 2}), false, testTimeouts)
+
+	for range 2 {
+		go func() {
+			req := httptest.NewRequest("GET", "/metrics?target="+slow.URL, nil)
+			req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "4")
+			scrapeRequest(t, h, req)
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	req := httptest.NewRequest("GET", "/metrics?target="+fast.URL, nil)
+	req.Header.Set("X-Prometheus-Scrape-Timeout-Seconds", "2")
+	_, body := scrapeRequest(t, h, req)
+	if !strings.Contains(body, "\npbs_up 1\n") || regexp.MustCompile(`pbs_collector_success\{[^}]*\} 0`).MatchString(body) {
+		t.Errorf("the fast target was slowed down by the slow one:\n%s", body)
+	}
+}
+
+// A target with invalid UTF-8 in the host gives pbs_up 0, not HTTP 500.
+func TestInvalidUTF8Target(t *testing.T) {
+	h := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v"}), false, testTimeouts)
+	code, body := scrape(t, h, "target=http://%FF:8007")
+	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 0\n") {
+		t.Errorf("status %d, body:\n%s", code, body)
 	}
 }

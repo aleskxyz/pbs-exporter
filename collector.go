@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 const promNamespace = "pbs"
@@ -209,6 +210,12 @@ type Exporter struct {
 // NewExporter returns the collector of one scrape of endpoint with module.
 // All PBS requests stop when ctx is done or after timeout, whichever is first.
 func NewExporter(ctx context.Context, endpoint string, module *Module, timeout time.Duration) *Exporter {
+	sem := module.sem
+	if module.endpoint == "" {
+		// the legacy module scrapes any "target": a limit shared by all
+		// targets would let one slow PBS block the scrapes of the others
+		sem = semaphore.NewWeighted(int64(module.maxConcurrency))
+	}
 	return &Exporter{
 		ctx:     ctx,
 		timeout: timeout,
@@ -217,7 +224,7 @@ func NewExporter(ctx context.Context, endpoint string, module *Module, timeout t
 			endpoint:            endpoint,
 			authorizationHeader: module.authorizationHeader,
 			client:              module.client,
-			sem:                 module.sem,
+			sem:                 sem,
 		},
 	}
 }
@@ -288,10 +295,13 @@ func recoverErr(f func() error) (err error) {
 	return f()
 }
 
+// endpointHost returns the host of endpoint as label value; the "target"
+// parameter of the legacy module may contain invalid UTF-8, which a label
+// value must not.
 func endpointHost(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return ""
 	}
-	return u.Hostname()
+	return strings.ToValidUTF8(u.Hostname(), "")
 }

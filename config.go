@@ -61,7 +61,8 @@ type Module struct {
 	authorizationHeader string
 	client              *http.Client
 	maxConcurrency      int
-	// sem limits the concurrent requests of all scrapes of the module.
+	// sem limits the concurrent requests of all scrapes of a module with a
+	// fixed endpoint; see NewExporter for modules without one.
 	sem        *semaphore.Weighted
 	collectors []*collector
 }

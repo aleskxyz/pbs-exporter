@@ -122,6 +122,8 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 		return sent, received, fmt.Errorf("%s: %w", path, err)
 	}
 	defer func() {
+		// read what is left, so the connection can be reused
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
 		if err := resp.Body.Close(); err != nil {
 			slog.Debug("closing response body", "err", sanitize(err.Error()))
 		}

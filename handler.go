@@ -44,11 +44,19 @@ func (t scrapeTimeouts) scrapeTimeout(r *http.Request) time.Duration {
 		return t.fallback
 	}
 	d := time.Duration(secs * float64(time.Second))
-	if d > t.offset {
-		d -= t.offset
+	if d <= 0 {
+		return t.fallback
 	}
-	return d
+	if d > t.offset {
+		return d - t.offset
+	}
+	// a timeout shorter than the offset still has to leave time for the response
+	return d / 2
 }
+
+// writeMargin is how long writing the response may take after the scrape
+// timeout; it bounds clients that do not read the response.
+const writeMargin = 30 * time.Second
 
 // newMetricsHandler returns the /metrics handler. With a config file
 // (configMode), each request selects a module with the "module" URL parameter
@@ -85,6 +93,9 @@ func newMetricsHandler(modules map[string]*Module, configMode bool, timeouts scr
 
 		timeout := timeouts.scrapeTimeout(r)
 		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(target), "timeout", timeout)
+		// the server has no WriteTimeout, as scrapes may take long; bound the
+		// write of this response instead (not supported by test recorders)
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + writeMargin))
 
 		reg := prometheus.NewRegistry()
 		if err := reg.Register(NewExporter(r.Context(), target, module, timeout)); err != nil {

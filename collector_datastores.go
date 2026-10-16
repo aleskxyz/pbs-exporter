@@ -64,18 +64,42 @@ func (s *scrapeState) getDatastoreList(ctx context.Context) ([]datastoreListItem
 }
 
 // maintenanceType returns the "type" of a maintenance mode property string
-// ("offline", "read-only", ...); the key may be omitted ("offline,message=x").
+// ("offline", "read-only", ...); the key may be omitted ("offline,message=x"),
+// and a quoted message may contain commas.
 func maintenanceType(mode string) string {
-	for _, part := range strings.Split(mode, ",") {
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			return strings.TrimSpace(k)
-		}
-		if strings.TrimSpace(k) == "type" {
+	parts := splitPropertyString(mode)
+	for _, part := range parts {
+		if k, v, ok := strings.Cut(part, "="); ok && strings.TrimSpace(k) == "type" {
 			return strings.TrimSpace(v)
 		}
 	}
+	for _, part := range parts {
+		if !strings.Contains(part, "=") {
+			return strings.TrimSpace(part)
+		}
+	}
 	return ""
+}
+
+// splitPropertyString splits a PBS property string at the commas that are
+// not inside double quotes.
+func splitPropertyString(s string) []string {
+	var parts []string
+	start, quoted := 0, false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++ // skip the escaped character
+		case '"':
+			quoted = !quoted
+		case ',':
+			if !quoted {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
 }
 
 // readableDatastores returns the datastores whose content can be read: not
@@ -118,7 +142,9 @@ func isDatastoreUnavailable(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "being deleted") ||
+	// "datastore is being deleted", "... being unmounted", "... in offline
+	// maintenance mode", "... is not mounted"
+	return strings.Contains(msg, "datastore is being") ||
 		strings.Contains(msg, "maintenance mode") ||
 		strings.Contains(msg, "not mounted")
 }
