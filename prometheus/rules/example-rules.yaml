@@ -145,8 +145,14 @@ groups:
           description: "The ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is {{ $labels.health }}."
 
       - alert: ProxmoxBackupZfsPoolMissing
-        # PBS does not list pools it can not read the usage of (e.g. FAULTED)
-        expr: "count by (instance) (pbs_zfs_pool_healthy) < count by (instance) (pbs_zfs_pool_healthy offset 1h)"
+        # PBS does not list pools it can not read the usage of (e.g. FAULTED);
+        # a lost last pool counts as 0, unless the zfs collector fails
+        expr: |
+          (
+            count by (instance) (pbs_zfs_pool_healthy)
+              or on (instance) 0 * count by (instance) (pbs_zfs_pool_healthy offset 1h)
+          ) < count by (instance) (pbs_zfs_pool_healthy offset 1h)
+            and on (instance) pbs_collector_success{collector="zfs"} == 1
         for: 5m
         labels:
           severity: critical

@@ -284,7 +284,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "(pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"ok\"} or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"none\"} * 0 or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"failed\"} * -1) * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
+          "expr": "sum without (state) (pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"ok\"} or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"none\"} * 0 or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"failed\"} * -1) * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
           "format": "table",
           "hide": false,
           "instant": false,
