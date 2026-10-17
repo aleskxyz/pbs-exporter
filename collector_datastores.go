@@ -30,10 +30,14 @@ var (
 
 // datastoreUsage is an entry of /status/datastore-usage.
 type datastoreUsage struct {
-	Store       string `json:"store"`
-	Avail       int64  `json:"avail"`
-	Total       int64  `json:"total"`
-	Used        int64  `json:"used"`
+	Store string `json:"store"`
+	// Avail, Total and Used are not set when PBS can not tell: an unmounted
+	// removable datastore, one that can not be opened (Error is set, e.g.
+	// offline maintenance) or one the token only sees through a namespace.
+	Avail       *int64 `json:"avail"`
+	Total       *int64 `json:"total"`
+	Used        *int64 `json:"used"`
+	Error       string `json:"error"`
 	MountStatus string `json:"mount-status"`
 	BackendType string `json:"backend-type"`
 }
@@ -44,7 +48,6 @@ type datastoreListItem struct {
 	// Maintenance is the maintenance mode as property string, e.g.
 	// "type=offline,message=disk swap"; empty without maintenance.
 	Maintenance string `json:"maintenance"`
-	MountStatus string `json:"mount-status"`
 }
 
 func (s *scrapeState) getDatastoreUsage(ctx context.Context) ([]datastoreUsage, error) {
@@ -160,9 +163,15 @@ var datastoresCollector = &collector{
 			return err
 		}
 		for _, d := range usage {
-			ch <- prometheus.MustNewConstMetric(available, prometheus.GaugeValue, float64(d.Avail), d.Store)
-			ch <- prometheus.MustNewConstMetric(size, prometheus.GaugeValue, float64(d.Total), d.Store)
-			ch <- prometheus.MustNewConstMetric(used, prometheus.GaugeValue, float64(d.Used), d.Store)
+			if d.Error != "" {
+				slog.Debug("datastore without usage", "datastore", sanitize(d.Store), "err", sanitize(d.Error))
+			}
+			// no series without a value: 0 bytes would read as a full datastore
+			for desc, v := range map[*prometheus.Desc]*int64{available: d.Avail, size: d.Total, used: d.Used} {
+				if v != nil {
+					ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, float64(*v), d.Store)
+				}
+			}
 		}
 		return nil
 	},

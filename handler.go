@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -58,6 +59,13 @@ func (t scrapeTimeouts) scrapeTimeout(r *http.Request) time.Duration {
 // timeout; it bounds clients that do not read the response.
 const writeMargin = 30 * time.Second
 
+// gatherErrorLog logs the errors of gathering metrics.
+type gatherErrorLog struct{}
+
+func (gatherErrorLog) Println(v ...any) {
+	slog.Error("gathering metrics", "err", sanitize(fmt.Sprint(v...)))
+}
+
 // newMetricsHandler returns the /metrics handler. With a config file
 // (configMode), each request selects a module with the "module" URL parameter
 // (default "default") and scrapes the module's endpoint. Without one, the
@@ -106,7 +114,12 @@ func newMetricsHandler(modules map[string]*Module, configMode bool, timeouts scr
 
 		// also expose the exporter's own go_* / process_* metrics
 		gatherers := prometheus.Gatherers{prometheus.DefaultGatherer, reg}
-		promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+		// a metric that can not be gathered (e.g. a duplicate series) must not
+		// cost the whole scrape, pbs_up and the collector status included
+		promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{
+			ErrorHandling: promhttp.ContinueOnError,
+			ErrorLog:      gatherErrorLog{},
+		}).ServeHTTP(w, r)
 	})
 	// same instrumentation as promhttp.Handler(): promhttp_metric_handler_requests_*
 	return promhttp.InstrumentMetricHandler(prometheus.DefaultRegisterer, h)

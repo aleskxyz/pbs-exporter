@@ -267,9 +267,9 @@ func TestDatastoreAvailability(t *testing.T) {
 	if want := []string{"gone", "ro", "store1"}; !slices.Equal(scanned, want) {
 		t.Errorf("scanned datastores %v, want %v", scanned, want)
 	}
-	// every datastore keeps its usage metrics
-	if n := testutil.CollectAndCount(e, "pbs_size"); n != 5 {
-		t.Errorf("pbs_size: %d series, want 5", n)
+	// PBS reports no usage for these datastores: no series instead of 0 bytes
+	if n := testutil.CollectAndCount(e, "pbs_size"); n != 0 {
+		t.Errorf("pbs_size: %d series, want none", n)
 	}
 }
 
@@ -324,8 +324,9 @@ func TestMaxConcurrency(t *testing.T) {
 	for range 3 {
 		<-done
 	}
-	if got := srv.MaxInFlight(); got > 2 {
-		t.Errorf("%d concurrent requests, want at most 2", got)
+	// the requests run concurrently, but never more than the limit
+	if got := srv.MaxInFlight(); got != 2 {
+		t.Errorf("%d concurrent requests, want 2", got)
 	}
 }
 
@@ -450,5 +451,61 @@ func TestInvalidUTF8Target(t *testing.T) {
 	code, body := scrape(t, h, "target=http://%FF:8007")
 	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 0\n") {
 		t.Errorf("status %d, body:\n%s", code, body)
+	}
+}
+
+// PBS lists datastores it can not read the usage of without total, used and
+// avail (unmounted, offline maintenance with "error", namespace access only).
+// They must not be exported as 0 bytes.
+func TestDatastoreWithoutUsage(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/status/datastore-usage": {body: `{"data":[
+			{"store":"store1","avail":1000,"total":3000,"used":2000,"mount-status":"nonremovable"},
+			{"store":"usb","mount-status":"notmounted"},
+			{"store":"offline","mount-status":"nonremovable","error":"datastore is in maintenance mode"}]}`},
+		"/api2/json/admin/datastore": {body: `{"data":[{"store":"store1"},{"store":"usb"},{"store":"offline","maintenance":"type=offline"}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, `
+# HELP pbs_size The size of the underlying storage in bytes.
+# TYPE pbs_size gauge
+pbs_size{datastore="store1"} 3000
+`, "pbs_size")
+	compare(t, e, collectorStatus(allOK), "pbs_collector_success")
+}
+
+// Every response is fetched once per scrape, although several collectors
+// use it.
+func TestSharedResponsesFetchedOnce(t *testing.T) {
+	srv := newFakePBS(t, nil)
+	if n := testutil.CollectAndCount(testExporter(t, srv, ModuleConfig{})); n == 0 {
+		t.Fatal("no metrics")
+	}
+	counts := map[string]int{}
+	for _, r := range srv.Requests() {
+		counts[r]++
+	}
+	for r, n := range counts {
+		if n != 1 {
+			t.Errorf("%s requested %d times in one scrape", r, n)
+		}
+	}
+}
+
+// A datastore that becomes unavailable after its namespaces were listed is
+// skipped, not reported as failure; other errors name the namespace.
+func TestNamespaceErrors(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/snapshots?ns=":       {status: http.StatusBadRequest, body: `{"data":null,"message":"datastore is in offline maintenance mode"}`},
+		"/api2/json/admin/datastore/store1/snapshots?ns=site-a": {status: http.StatusForbidden, body: `{"data":null,"message":"permission check failed"}`},
+	})
+	logs := captureLogs(t)
+	e := testExporter(t, srv, ModuleConfig{})
+	compare(t, e, collectorStatus(map[string]float64{"datastores": 1, "node": 1, "snapshots": 0, "version": 1}), "pbs_collector_success")
+	if !strings.Contains(logs.String(), `datastore store1, namespace \"site-a\"`) {
+		t.Errorf("the error does not name the namespace:\n%s", logs)
+	}
+	if strings.Contains(logs.String(), "offline maintenance mode: ") {
+		t.Errorf("an unavailable datastore must be skipped:\n%s", logs)
 	}
 }

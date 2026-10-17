@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // scrape is also called from goroutines, so it must not call t.Fatal.
@@ -453,5 +455,24 @@ func TestRedirects(t *testing.T) {
 	legacy := newMetricsHandler(testModules(t, nil, &ModuleConfig{User: "u@pam", TokenName: "n", TokenValue: "v", Endpoint: pinned.URL}), false, testTimeouts)
 	if _, body := scrape(t, legacy, ""); !strings.Contains(body, `version="7.7.7"`) {
 		t.Errorf("legacy module must still follow redirects, got:\n%s", body)
+	}
+}
+
+// A metric that can not be gathered does not cost the other metrics.
+func TestGatherErrorKeepsOtherMetrics(t *testing.T) {
+	srv, _ := fakePBS(t, "1.2.3")
+	m := testModules(t, Config{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL}}, nil)["site"]
+	// a collector that emits the same series twice
+	dup := &collector{name: "dup", enabled: true, descs: []*prometheus.Desc{version},
+		collect: func(_ context.Context, _ *scrapeState, ch chan<- prometheus.Metric) error {
+			for range 2 {
+				ch <- prometheus.MustNewConstMetric(version, prometheus.GaugeValue, 1, "x", "y", "z")
+			}
+			return nil
+		}}
+	m.collectors = []*collector{versionCollector, dup}
+	code, body := scrape(t, newMetricsHandler(map[string]*Module{"site": m}, true, testTimeouts), "module=site")
+	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 1\n") {
+		t.Errorf("status %d, body:\n%s", code, body)
 	}
 }

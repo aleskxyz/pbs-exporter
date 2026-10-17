@@ -78,7 +78,16 @@ func (s *scrapeState) forEachNamespace(ctx context.Context, f func(store, ns str
 			return err
 		}
 		return forEach(namespaces, s.maxConcurrency, func(ns namespaceItem) error {
-			return f(store, ns.Namespace)
+			err := f(store, ns.Namespace)
+			// the datastore may become unavailable after its namespaces were listed
+			if isDatastoreUnavailable(err) {
+				slog.Info("skipping unavailable datastore", "datastore", sanitize(store), "err", sanitize(err.Error()))
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("datastore %s, namespace %q: %w", store, ns.Namespace, err)
+			}
+			return nil
 		})
 	})
 	return errors.Join(storesErr, err)
