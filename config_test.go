@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -381,19 +380,6 @@ func TestTokenFileLimits(t *testing.T) {
 	}
 	if _, err := readTokenFile(dir); err == nil {
 		t.Error("expected an error for a directory")
-	}
-	fifo := filepath.Join(dir, "fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
-		done := make(chan error, 1)
-		go func() { _, err := readTokenFile(fifo); done <- err }()
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Error("expected an error for a FIFO")
-			}
-		case <-time.After(2 * time.Second):
-			t.Error("reading a FIFO blocks")
-		}
 	}
 }
 

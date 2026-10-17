@@ -3,6 +3,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -207,6 +209,8 @@ var groupsCollector = &collector{
 		// stores with a namespace whose groups are unknown: their backup tasks
 		// could belong to a group that is not seen
 		incomplete := map[string]bool{}
+		// stores whose namespaces may be hidden for lack of privileges
+		unaudited := map[string]bool{}
 		perms, permsErr := s.getPermissions(ctx)
 		nsErr := s.forEachNamespace(ctx, func(store, ns string) error {
 			groups, err := s.getGroups(ctx, store, ns)
@@ -226,8 +230,12 @@ var groupsCollector = &collector{
 			all = append(all, namespaceGroups{store, ns, uniqueGroups(groups), summaries})
 			// PBS leaves out namespaces without privileges: without
 			// Datastore.Audit on the whole datastore, groups may be unseen
-			if permsErr != nil || !perms.canAuditDatastore(store) {
+			switch {
+			case permsErr != nil:
 				incomplete[store] = true
+			case !perms.canAuditDatastore(store):
+				incomplete[store] = true
+				unaudited[store] = true
 			}
 			mu.Unlock()
 			return snapErr
@@ -239,8 +247,19 @@ var groupsCollector = &collector{
 		for _, nsg := range all {
 			collectGroupMetrics(nsg, lastTasks, ch)
 		}
-		return joinUnique(nsErr, taskErr, permsErr)
+		return joinUnique(nsErr, taskErr, permsErr, missingDatastoreAudit(unaudited))
 	},
+}
+
+// missingDatastoreAudit returns the error for stores the token audits only
+// some namespaces of: their backup task metrics are left out.
+func missingDatastoreAudit(unaudited map[string]bool) error {
+	if len(unaudited) == 0 {
+		return nil
+	}
+	stores := slices.Sorted(maps.Keys(unaudited))
+	return fmt.Errorf("missing privilege Datastore.Audit on /datastore/%s: namespaces without privileges are hidden, the backup task metrics of the datastore are left out",
+		strings.Join(stores, ", /datastore/"))
 }
 
 func collectGroupMetrics(nsg namespaceGroups, lastTasks map[groupRef]taskItem, ch chan<- prometheus.Metric) {
@@ -334,7 +353,8 @@ func canWrite(authID, owner string) bool {
 // The worker ID of a backup task has no namespace, so a task belongs to the
 // group with its type and ID that the task user can write to. A task that
 // fits groups in several namespaces is left out, and so are the tasks of
-// incomplete stores.
+// incomplete stores. A group has no result when such an ambiguous task is
+// newer than its own newest task: the ambiguous one may be its last backup.
 func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[string]bool) map[groupRef]taskItem {
 	candidates := map[backupTaskKey][]groupRef{}
 	owners := map[groupRef]string{}
@@ -347,7 +367,9 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 		}
 	}
 
-	return newestPerKey(tasks, func(t taskItem) (groupRef, bool) {
+	// start of the newest ambiguous task per group it may belong to
+	ambiguous := map[groupRef]int64{}
+	newest := newestPerKey(tasks, func(t taskItem) (groupRef, bool) {
 		if t.WorkerType != "backup" {
 			return groupRef{}, false
 		}
@@ -362,10 +384,19 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 			}
 		}
 		if len(match) != 1 {
+			for _, ref := range match {
+				ambiguous[ref] = max(ambiguous[ref], t.StartTime)
+			}
 			return groupRef{}, false
 		}
 		return match[0], true
 	})
+	for ref, t := range newest {
+		if start, ok := ambiguous[ref]; ok && start >= t.StartTime {
+			delete(newest, ref)
+		}
+	}
+	return newest
 }
 
 // uniqueGroups returns groups without the groups listed more than once,

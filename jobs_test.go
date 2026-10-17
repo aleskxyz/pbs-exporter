@@ -112,7 +112,7 @@ pbs_tasks_running{worker_type="syncjob"} 1
 func TestSyncJobsWithoutRemoteAudit(t *testing.T) {
 	logs := captureLogs(t)
 	srv := newFakePBS(t, map[string]fakeResp{
-		"/api2/json/access/permissions":            {body: `{"data":{"/":{"Datastore.Audit":true},"/remote":{"Datastore.Audit":true,"Sys.Audit":true},"/system":{"Sys.Audit":true}}}`},
+		"/api2/json/access/permissions":            {body: `{"data":{"/":{"Datastore.Audit":true},"/datastore":{"Datastore.Audit":true},"/remote":{"Datastore.Audit":true,"Sys.Audit":true},"/system":{"Sys.Audit":true}}}`},
 		"/api2/json/admin/sync?sync-direction=all": {body: `{"data":[]}`},
 		"/api2/json/config/remote":                 {body: `{"data":[]}`},
 	})

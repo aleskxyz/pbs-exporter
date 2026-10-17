@@ -162,7 +162,7 @@ privileges (`/access/permissions`) and reports what is missing as failed collect
   task log (`source="tasks"`), and the `sync` collector reports the missing privilege.
 - Without `Sys.Audit` on `/system/tasks`, the task log only shows the token's own tasks; the collectors that use it report it.
 - Without `Datastore.Audit` on a whole datastore, PBS leaves out the namespaces the token can not see; backup tasks are then not
-  matched to groups of that datastore.
+  matched to groups of that datastore, and the `groups` collector reports the missing privilege.
 - Without `Sys.Audit` on `/access/users`, the user list only shows the token's own user (`access` collector).
 
 ## Collectors

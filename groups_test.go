@@ -184,14 +184,15 @@ func TestBackupInterval(t *testing.T) {
 
 // Backup task worker IDs have no namespace: a task belongs to the group its
 // user can write to (owner, or user of an owning token); a task that fits
-// several groups, or a store with unknown groups, is left out.
+// several groups, or a store with unknown groups, is left out. A group whose
+// newest task may be such an ambiguous one has no result.
 func TestMatchBackupTasks(t *testing.T) {
 	group := func(id, owner string) groupItem {
 		return groupItem{BackupType: "vm", BackupID: id, Owner: owner}
 	}
 	all := []namespaceGroups{
-		{store: "main", ns: "site-a", groups: []groupItem{group("230", "a@pbs"), group("231", "c@pbs"), group("232", "d@pbs!t1"), group("233", "x@pbs"), group("234", "y@pbs")}},
-		{store: "main", ns: "site-b", groups: []groupItem{group("230", "b@pbs!tok"), group("231", "c@pbs"), group("232", "e@pbs")}},
+		{store: "main", ns: "site-a", groups: []groupItem{group("230", "a@pbs"), group("231", "c@pbs"), group("232", "d@pbs!t1"), group("233", "x@pbs"), group("234", "y@pbs"), group("235", "f@pbs"), group("236", "g@pbs")}},
+		{store: "main", ns: "site-b", groups: []groupItem{group("230", "b@pbs!tok"), group("231", "c@pbs"), group("232", "e@pbs"), group("235", "f@pbs!tok"), group("236", "g@pbs!tok")}},
 		{store: "other", ns: "", groups: []groupItem{group("230", "a@pbs")}},
 	}
 	task := func(store, id, user string, start int64, status string) taskItem {
@@ -207,6 +208,10 @@ func TestMatchBackupTasks(t *testing.T) {
 		task("main", "233", "x@pbs", 100, "OK"),
 		task("main", "233", "x@pbs", 500, ""),      // still running
 		task("main", "234", "root@pam", 100, "OK"), // not the owner
+		task("main", "235", "f@pbs!tok", 100, "OK"),
+		task("main", "235", "f@pbs", 200, "backup failed"), // may also be site-b's
+		task("main", "236", "g@pbs", 100, "OK"),
+		task("main", "236", "g@pbs!tok", 200, "OK"), // newer than the ambiguous task
 		task("other", "230", "a@pbs", 50, "OK"),
 		{WorkerType: "reader", WorkerID: "main:vm/233", User: "x@pbs", StartTime: 900, EndTime: 910, Status: "OK"},
 	}
@@ -214,6 +219,7 @@ func TestMatchBackupTasks(t *testing.T) {
 		{"main", "site-a", "vm", "230"}: 200,
 		{"main", "site-b", "vm", "230"}: 300,
 		{"main", "site-a", "vm", "233"}: 100,
+		{"main", "site-b", "vm", "236"}: 200,
 		{"other", "", "vm", "230"}:      50,
 	}
 	got := matchBackupTasks(all, tasks, nil)
@@ -422,13 +428,25 @@ func TestBackupTaskMetricsEdgeCases(t *testing.T) {
 
 // Without Datastore.Audit on the whole datastore, PBS leaves out the
 // namespaces the token can not see; a backup task could belong to a group in
-// one of them, so tasks are not matched.
+// one of them, so tasks are not matched, and the collector reports the
+// missing privilege.
 func TestBackupTasksWithHiddenNamespaces(t *testing.T) {
+	logs := captureLogs(t)
 	srv := newFakePBS(t, map[string]fakeResp{
 		"/api2/json/access/permissions": {body: `{"data":{"/datastore":{"Datastore.Audit":false},"/remote":{"Remote.Audit":true},"/system":{"Sys.Audit":true}}}`},
 	})
-	if got := seriesOf(t, testExporter(t, srv, ModuleConfig{}), "pbs_group_last_backup_task_success"); len(got) != 0 {
+	e := testExporter(t, srv, ModuleConfig{})
+	if got := seriesOf(t, e, "pbs_group_last_backup_task_success"); len(got) != 0 {
 		t.Errorf("tasks matched without access to all namespaces: %v", got)
+	}
+	if got := seriesOf(t, e, "pbs_group_snapshots"); len(got) == 0 {
+		t.Error("the group metrics are left out as well")
+	}
+	if got := seriesOf(t, e, "pbs_collector_success"); !slices.Contains(got, `pbs_collector_success{collector="groups"} 0`) {
+		t.Errorf("groups collector does not fail: %v", got)
+	}
+	if !strings.Contains(logs.String(), "missing privilege Datastore.Audit on /datastore/store1: ") {
+		t.Errorf("the log does not name the privilege:\n%s", logs)
 	}
 	p := permissions{"/datastore/store1": {"Datastore.Audit": true}}
 	if !p.canAuditDatastore("store1") || p.canAuditDatastore("store2") {
