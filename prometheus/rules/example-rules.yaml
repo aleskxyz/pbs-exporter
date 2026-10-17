@@ -1,55 +1,171 @@
+# Example alerts for pbs-exporter. Thresholds are examples: adjust them to
+# your backup schedules (e.g. weekly backups need more than 2 days).
 groups:
   - name: ProxmoxBackupServer.rules
 
     rules:
+      # --- exporter and server ---------------------------------------------
+
       - alert: ProxmoxBackupHostDown
-        expr: "absent(pbs_available)"
-        for: 2m
+        expr: "pbs_up == 0"
+        for: 5m
         labels:
           severity: warning
         annotations:
           summary: Proxmox Backup Server down
           description: "Proxmox Backup Server {{ $labels.instance }} is not available."
 
-      - alert: ProxmoxBackupSnapshotVerifyFailed
-        expr: 'sum by (vm_id) (max_over_time(pbs_snapshot_vm_last_verify[2d]) and pbs_snapshot_vm_count > 1) == 0'
-        for: 2m
+      - alert: ProxmoxBackupCollectorFailed
+        expr: "pbs_collector_success == 0"
+        for: 15m
         labels:
           severity: warning
         annotations:
-          summary: Last verified Proxmox snapshot older than 2 days
-          description: "Last verified snapshot of vm {{ $labels.vm_name }} is older than 2 days."
+          summary: pbs-exporter collector {{ $labels.collector }} fails
+          description: "The {{ $labels.collector }} collector for {{ $labels.instance }} fails, its metrics are missing or incomplete (e.g. a missing privilege of the API token). See the exporter log."
+
+      # --- backups ---------------------------------------------------------
 
       - alert: ProxmoxBackupSnapshotOutdated
-        expr: '(time() - avg_over_time(pbs_snapshot_vm_last_timestamp[5m])) / 3600 / 24 > 2'
-        for: 2m
+        expr: |
+          ((time() - pbs_group_last_backup_timestamp_seconds) / 86400 > 2)
+            * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info
+        for: 15m
         labels:
           severity: warning
         annotations:
-          summary: Last snapshot of vm is older than 2 days
-          description: "Last snapshot of vm {{ $labels.vm_name }} is older than 2 days."
+          summary: Last backup of {{ $labels.backup_type }}/{{ $labels.backup_id }} is older than 2 days
+          description: "The newest finished backup of {{ $labels.backup_type }}/{{ $labels.backup_id }} ({{ $labels.comment }}) in {{ $labels.datastore }}/{{ $labels.pbs_namespace }} is {{ $value | printf \"%.1f\" }} days old."
+
+      - alert: ProxmoxBackupTaskFailed
+        expr: |
+          (pbs_group_last_backup_task_success == 0)
+            * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Last backup of {{ $labels.backup_type }}/{{ $labels.backup_id }} failed
+          description: "The last backup task of {{ $labels.backup_type }}/{{ $labels.backup_id }} ({{ $labels.comment }}) in {{ $labels.datastore }}/{{ $labels.pbs_namespace }} on {{ $labels.instance }} failed."
+
+      - alert: ProxmoxBackupSnapshotVerifyFailed
+        expr: "pbs_group_snapshots_by_verify_state{state=\"failed\"} > 0"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Verification of backups of {{ $labels.backup_type }}/{{ $labels.backup_id }} failed
+          description: "{{ $value }} snapshots of {{ $labels.backup_type }}/{{ $labels.backup_id }} in {{ $labels.datastore }}/{{ $labels.pbs_namespace }} on {{ $labels.instance }} failed verification: they may not be restorable."
+
+      - alert: ProxmoxBackupSnapshotNotVerified
+        expr: "pbs_group_last_backup_verify_state{state=\"none\"} == 1"
+        for: 2d
+        labels:
+          severity: info
+        annotations:
+          summary: Newest backup of {{ $labels.backup_type }}/{{ $labels.backup_id }} not verified for 2 days
+          description: "The newest backup of {{ $labels.backup_type }}/{{ $labels.backup_id }} in {{ $labels.datastore }}/{{ $labels.pbs_namespace }} on {{ $labels.instance }} has not been verified for 2 days. Check the verify jobs."
+
+      - alert: ProxmoxBackupBadChunks
+        expr: "pbs_gc_bad_chunks{state=\"still_bad\"} > 0"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Corrupt chunks in datastore {{ $labels.datastore }}
+          description: "The last garbage collection of {{ $labels.datastore }} on {{ $labels.instance }} found {{ $value }} corrupt chunks that snapshots still reference."
+
+      # --- jobs ------------------------------------------------------------
+
+      - alert: ProxmoxBackupJobFailed
+        expr: "pbs_job_last_run_success == 0"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job_type }} job {{ $labels.job_id }} failed"
+          description: "The last run of the {{ $labels.job_type }} job {{ $labels.job_id }} ({{ $labels.datastore }}/{{ $labels.pbs_namespace }}) on {{ $labels.instance }} failed."
+
+      - alert: ProxmoxBackupJobOverdue
+        expr: "time() - pbs_job_next_run_timestamp_seconds > 3600"
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job_type }} job {{ $labels.job_id }} is overdue"
+          description: "The {{ $labels.job_type }} job {{ $labels.job_id }} on {{ $labels.instance }} should have started more than an hour ago."
+
+      - alert: ProxmoxBackupSyncNotRunning
+        expr: "time() - pbs_job_last_run_end_timestamp_seconds{job_type=\"sync\"} > 2 * 86400"
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sync job {{ $labels.job_id }} has not run for 2 days
+          description: "The sync job {{ $labels.job_id }} into {{ $labels.datastore }}/{{ $labels.pbs_namespace }} on {{ $labels.instance }} last finished {{ $value | humanizeDuration }} ago."
+
+      - alert: ProxmoxBackupTaskFailures
+        expr: "pbs_task_failures > 0"
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: Failed {{ $labels.worker_type }} tasks on {{ $labels.instance }}
+          description: "{{ $value }} {{ $labels.worker_type }} tasks ({{ $labels.datastore }}) failed in the last 24 hours on {{ $labels.instance }}."
+
+      # --- datastores ------------------------------------------------------
 
       - alert: ProxmoxBackupPoolDiskOutOfSpace
-        expr: "pbs_used / pbs_size * 100 > 90"
-        for: 2m
+        expr: "pbs_datastore_used_bytes / pbs_datastore_size_bytes * 100 > 90"
+        for: 5m
         labels:
           severity: warning
         annotations:
           summary: Proxmox datastore out of space (datastore {{ $labels.datastore }})
-          description: "Disk is almost full (< 10% left)\n  VALUE = {{ $value }}"
+          description: "Datastore {{ $labels.datastore }} on {{ $labels.instance }} is almost full (< 10% left)\n  VALUE = {{ $value }}"
 
       - alert: ProxmoxBackupPoolDiskFillingUpInFourDays
-        annotations:
-          description: Based on recent sampling, the datastore {{ $labels.datastore }} is expected to fill up withing four days. Currently {{ $value | humanizePercentage }} is available.
-          summary: Proxmox datastore is filling up.
-        expr: pbs_used / pbs_size > 0.7 and pbs_used > 0 and predict_linear(pbs_available[6h], 4 * 24 * 3600) < 0
+        expr: "pbs_datastore_estimated_full_timestamp_seconds - time() < 4 * 86400"
         for: 30m
         labels:
           severity: warning
+        annotations:
+          summary: Proxmox datastore is filling up.
+          description: "Proxmox Backup Server expects the datastore {{ $labels.datastore }} on {{ $labels.instance }} to be full in {{ $value | humanizeDuration }}."
+
+      # --- node ------------------------------------------------------------
+
+      - alert: ProxmoxBackupZfsPoolUnhealthy
+        expr: "pbs_zfs_pool_healthy == 0"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: ZFS pool {{ $labels.pool }} is {{ $labels.health }}
+          description: "The ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is {{ $labels.health }}."
+
+      - alert: ProxmoxBackupZfsPoolMissing
+        # PBS does not list pools it can not read the usage of (e.g. FAULTED)
+        expr: "count by (instance) (pbs_zfs_pool_healthy) < count by (instance) (pbs_zfs_pool_healthy offset 1h)"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: ZFS pool missing on {{ $labels.instance }}
+          description: "{{ $labels.instance }} lists fewer ZFS pools than an hour ago: a pool may have failed (FAULTED or UNAVAIL pools are not listed)."
+
+      - alert: ProxmoxBackupClockSkew
+        expr: "abs(pbs_node_time_offset_seconds) > 30"
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Clock of {{ $labels.instance }} is off
+          description: "The clock of {{ $labels.instance }} differs by {{ $value | printf \"%.0f\" }} seconds from the exporter's."
 
       - alert: ProxmoxBackupRootDiskOutOfSpace
-        expr: "pbs_host_disk_used / pbs_host_disk_total * 100 > 90"
-        for: 2m
+        expr: "pbs_host_disk_used_bytes / pbs_host_disk_total_bytes * 100 > 90"
+        for: 5m
         labels:
           severity: warning
         annotations:
@@ -57,49 +173,66 @@ groups:
           description: "Disk is almost full (< 10% left)\n  VALUE = {{ $value }}"
 
       - alert: ProxmoxBackupRootDiskFillingUpInFourDays
-        annotations:
-          description: Based on recent sampling, the root disk {{ $labels.instance }} is expected to fill up withing four days. Currently {{ $value | humanizePercentage }} is available.
-          summary: Proxmox root disk is filling up.
-        expr:
-          pbs_host_disk_used / pbs_host_disk_total > 0.7 and pbs_host_disk_used > 0 and
-          predict_linear(pbs_host_disk_available[6h], 4 * 24 * 3600) < 0
+        expr: |
+          pbs_host_disk_used_bytes / pbs_host_disk_total_bytes > 0.7 and pbs_host_disk_used_bytes > 0 and
+          predict_linear(pbs_host_disk_available_bytes[6h], 4 * 24 * 3600) < 0
         for: 30m
         labels:
           severity: warning
+        annotations:
+          summary: Proxmox root disk is filling up.
+          description: "Based on recent sampling, the root disk of {{ $labels.instance }} is expected to fill up within four days. Currently {{ $value | humanizePercentage }} is used."
 
       - alert: ProxmoxBackupHostOutOfMemory
-        expr: "pbs_host_memory_used / (pbs_host_memory_used + pbs_host_memory_free) * 100 > 90"
-        for: 2m
+        expr: "pbs_host_memory_used_bytes / pbs_host_memory_total_bytes * 100 > 90"
+        for: 5m
         labels:
           severity: warning
         annotations:
           summary: Proxmox host out of memory (instance {{ $labels.instance }})
-          description: "Node memory is filling up (< 10% left)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+          description: "Node memory is filling up (< 10% left)\n  VALUE = {{ $value }}"
 
       - alert: ProxmoxBackupHostSwapIsFillingUp
-        expr: "pbs_host_swap_used / (pbs_host_swap_used + pbs_host_swap_free) * 100 > 80"
-        for: 2m
+        expr: "pbs_host_swap_used_bytes / pbs_host_swap_total_bytes * 100 > 80"
+        for: 5m
         labels:
           severity: warning
         annotations:
-          summary: Proxmox host swap is filling up  (instance {{ $labels.instance }})
-          description: "Swap is filling up (> 80%)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+          summary: Proxmox host swap is filling up (instance {{ $labels.instance }})
+          description: "Swap is filling up (> 80%)\n  VALUE = {{ $value }}"
 
       - alert: ProxmoxBackupHostHighCpuLoad
-        expr: "avg_over_time(pbs_host_cpu_usage[2m]) > 0.8"
+        expr: "avg_over_time(pbs_host_cpu_usage_ratio[10m]) > 0.8"
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: Host high CPU load (id {{ $labels.id }})
-
-          description: "CPU load is > 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+          summary: Host high CPU load (instance {{ $labels.instance }})
+          description: "CPU load is > 80%\n  VALUE = {{ $value }}"
 
       - alert: ProxmoxBackupHostHighIowait
-        expr: "avg by (instance) (rate(pbs_host_io_wait[5m]) * 100) > 10"
-        for: 0m
+        expr: "avg_over_time(pbs_host_io_wait_ratio[10m]) * 100 > 10"
+        for: 10m
         labels:
           severity: warning
         annotations:
           summary: Host CPU high iowait (instance {{ $labels.instance }})
-          description: "CPU iowait > 10%. A high iowait means that you are disk or network bound.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+          description: "CPU iowait > 10%. A high iowait means that you are disk or network bound.\n  VALUE = {{ $value }}"
+
+      - alert: ProxmoxBackupRebootRequired
+        expr: "pbs_reboot_required == 1"
+        for: 1d
+        labels:
+          severity: info
+        annotations:
+          summary: Reboot of {{ $labels.instance }} required
+          description: "A newer kernel is installed on {{ $labels.instance }} than the running one."
+
+      - alert: ProxmoxBackupSubscriptionDueSoon
+        expr: "pbs_host_subscription_due_timestamp_seconds - time() < 14 * 86400"
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: Subscription of {{ $labels.instance }} is due soon
+          description: "The subscription {{ $labels.productname }} of {{ $labels.instance }} is due in {{ $value | humanizeDuration }}."
