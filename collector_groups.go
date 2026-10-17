@@ -319,24 +319,6 @@ type groupRef struct {
 	store, ns, backupType, backupID string
 }
 
-// backupTaskKey is what the worker ID of a backup task says about its group:
-// "<store>:<type>/<id>", without the namespace.
-type backupTaskKey struct {
-	store, backupType, backupID string
-}
-
-func parseBackupWorkerID(workerID string) (backupTaskKey, bool) {
-	store, group, ok := strings.Cut(workerID, ":")
-	if !ok {
-		return backupTaskKey{}, false
-	}
-	backupType, backupID, ok := strings.Cut(group, "/")
-	if !ok || store == "" || backupType == "" || backupID == "" {
-		return backupTaskKey{}, false
-	}
-	return backupTaskKey{store, backupType, backupID}, true
-}
-
 // canWrite reports whether a task of authID can have created a snapshot in
 // a group owned by owner: PBS only lets the owner, or the user of an owning
 // API token, add snapshots to a group (there is no exception for root@pam).

@@ -1,8 +1,24 @@
 {
   "data": {
-    "/": {"Datastore.Audit": true, "Sys.Audit": true},
-    "/datastore": {"Datastore.Audit": true, "Sys.Audit": true},
-    "/remote": {"Datastore.Audit": true, "Remote.Audit": true, "Sys.Audit": true},
-    "/system/tasks": {"Datastore.Audit": true, "Sys.Audit": true}
+    "/": {
+      "Datastore.Audit": true,
+      "Sys.Audit": true
+    },
+    "/datastore": {
+      "Datastore.Audit": true,
+      "Sys.Audit": true
+    },
+    "/remote": {
+      "Datastore.Audit": true,
+      "Remote.Audit": true,
+      "Sys.Audit": true
+    },
+    "/system/tasks": {
+      "Datastore.Audit": true,
+      "Sys.Audit": true
+    },
+    "/access": {
+      "Sys.Audit": true
+    }
   }
 }

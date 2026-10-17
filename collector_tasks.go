@@ -21,33 +21,12 @@ var (
 	taskFailures = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "", "task_failures"),
 		"Tasks that ended with an error in the last 24 hours, or task_lookback if shorter (warnings do not count); omitted when there are none.",
-		[]string{"worker_type", "store"}, nil,
+		[]string{"worker_type", "datastore"}, nil,
 	)
 )
 
 // taskFailureWindow is how far back pbs_task_failures counts.
 const taskFailureWindow = 24 * time.Hour
-
-// storeWorkerTypes have the datastore as first part of their worker ID.
-var storeWorkerTypes = map[string]bool{
-	// "sync" is a sync started by hand, its worker ID is the local datastore
-	"sync":   true,
-	"backup": true, "reader": true, "prune": true, "prunejob": true, "garbage_collection": true,
-	"verificationjob": true, "verify": true, "verify_group": true, "verify_snapshot": true,
-}
-
-// taskStore returns the datastore a task worked on, "" if it has none.
-func taskStore(t taskItem) string {
-	if t.WorkerType == "syncjob" {
-		id, _ := parseSyncWorkerID(t.WorkerID)
-		return id.store
-	}
-	if storeWorkerTypes[t.WorkerType] {
-		store, _, _ := strings.Cut(t.WorkerID, ":")
-		return store
-	}
-	return ""
-}
 
 // taskFailed reports whether a finished task ended with an error.
 func taskFailed(t taskItem) bool {
@@ -86,6 +65,18 @@ func newestPerKey[K comparable](tasks []taskItem, key func(taskItem) (K, bool)) 
 		}
 	}
 	return out
+}
+
+// countTasks counts the tasks per key; key reports false for tasks to leave
+// out.
+func countTasks[K comparable](tasks []taskItem, key func(taskItem) (K, bool)) map[K]int {
+	counts := map[K]int{}
+	for _, t := range tasks {
+		if k, ok := key(t); ok {
+			counts[k]++
+		}
+	}
+	return counts
 }
 
 // succeeded reports whether a task or job run ended without error; a run
@@ -182,12 +173,9 @@ func collectTaskFailures(ctx context.Context, s *scrapeState, ch chan<- promethe
 	}
 	type key struct{ workerType, store string }
 	since := s.now.Add(-taskFailureWindow).Unix()
-	counts := map[key]int{}
-	for _, t := range tasks {
-		if taskFailed(t) && t.EndTime >= since {
-			counts[key{t.WorkerType, taskStore(t)}]++
-		}
-	}
+	counts := countTasks(tasks, func(t taskItem) (key, bool) {
+		return key{t.WorkerType, taskStore(t)}, taskFailed(t) && t.EndTime >= since
+	})
 	for k, n := range counts {
 		ch <- prometheus.MustNewConstMetric(taskFailures, prometheus.GaugeValue, float64(n), k.workerType, k.store)
 	}

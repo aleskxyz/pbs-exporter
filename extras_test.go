@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,10 +90,10 @@ func TestTaskFailures(t *testing.T) {
 	compare(t, e, `
 # HELP pbs_task_failures Tasks that ended with an error in the last 24 hours, or task_lookback if shorter (warnings do not count); omitted when there are none.
 # TYPE pbs_task_failures gauge
-pbs_task_failures{store="",worker_type="aptupdate"} 1
-pbs_task_failures{store="store1",worker_type="backup"} 2
-pbs_task_failures{store="store2",worker_type="syncjob"} 1
-pbs_task_failures{store="store3",worker_type="sync"} 1
+pbs_task_failures{datastore="",worker_type="aptupdate"} 1
+pbs_task_failures{datastore="store1",worker_type="backup"} 2
+pbs_task_failures{datastore="store2",worker_type="syncjob"} 1
+pbs_task_failures{datastore="store3",worker_type="sync"} 1
 `, "pbs_task_failures")
 }
 
@@ -171,7 +172,8 @@ func TestAccessAndDisks(t *testing.T) {
 	compare(t, e, `
 # HELP pbs_user_info A user of the PBS, always 1.
 # TYPE pbs_user_info gauge
-pbs_user_info{enabled="false",userid="mon@pbs"} 1
+pbs_user_info{enabled="true",userid="mon@pbs"} 1
+pbs_user_info{enabled="false",userid="old@pbs"} 1
 pbs_user_info{enabled="true",userid="root@pam"} 1
 # HELP pbs_user_expiry_timestamp_seconds When the user account expires; omitted when it never expires.
 # TYPE pbs_user_expiry_timestamp_seconds gauge
@@ -179,10 +181,10 @@ pbs_user_expiry_timestamp_seconds{userid="mon@pbs"} 1.9e+09
 # HELP pbs_token_expiry_timestamp_seconds When the API token expires; omitted when it never expires.
 # TYPE pbs_token_expiry_timestamp_seconds gauge
 pbs_token_expiry_timestamp_seconds{tokenid="mon@pbs!exporter"} 1.8e+09
-# HELP pbs_reader_tasks Reader tasks (restores, and syncs from other servers) started in the last 24 hours, or task_lookback if shorter.
+# HELP pbs_reader_tasks Reader tasks (restores, and syncs from other servers) started in the last 24 hours, or task_lookback if shorter, per user or API token.
 # TYPE pbs_reader_tasks gauge
-pbs_reader_tasks{user="alice@pbs"} 1
-pbs_reader_tasks{user="sync@pbs"} 2
+pbs_reader_tasks{userid="alice@pbs"} 1
+pbs_reader_tasks{userid="sync@pbs"} 2
 # HELP pbs_disk_smart_status SMART health of a disk as PBS reports it (status passed, failed or unknown), always 1.
 # TYPE pbs_disk_smart_status gauge
 pbs_disk_smart_status{disk="nvme0n1",model="Example NVMe 3.2TB",serial="N0001",status="unknown"} 1
@@ -210,5 +212,66 @@ func TestGCStatusWithoutGC(t *testing.T) {
 	e := testExporter(t, srv, ModuleConfig{})
 	if got := seriesOf(t, e, "pbs_gc_disk_bytes", "pbs_gc_index_data_bytes", "pbs_gc_bad_chunks"); len(got) != 0 {
 		t.Errorf("GC series without a garbage collection: %v", got)
+	}
+}
+
+// The datastore of a task is taken from its worker ID per worker type.
+func TestTaskStore(t *testing.T) {
+	for _, tc := range []struct{ workerType, workerID, want string }{
+		{"backup", "store1:vm/100", "store1"},
+		{"prune", "store1:ns:vm/100", "store1"},
+		{"prunejob", "store1", "store1"},
+		{"verificationjob", "store1:v-1", "store1"},
+		{"reader", "store1:vm/100", "store1"},
+		{"syncjob", "remote:rs:store1::s-1", "store1"},
+		{"sync", "store1", "store1"},
+		{"unmount-device", "usb", "usb"},
+		{"move-group", "store1:ns/vm/100:target", "store1"},
+		{"tape-backup-job", "store1:pool:drive:job", "store1"},
+		{"aptupdate", "", ""},
+		{"termproxy", "1234", ""},
+	} {
+		if got := taskStore(taskItem{WorkerType: tc.workerType, WorkerID: tc.workerID}); got != tc.want {
+			t.Errorf("%s %q: got %q, want %q", tc.workerType, tc.workerID, got, tc.want)
+		}
+	}
+}
+
+// Without Sys.Audit on /access/users, PBS lists only the token's own user;
+// the access collector reports it.
+func TestFilteredUserList(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions": {body: `{"data":{"/":{"Datastore.Audit":true},"/access":{"Sys.Audit":false},"/system":{"Sys.Audit":true}}}`},
+	})
+	got := seriesOf(t, testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"access": true}}), "pbs_collector_success")
+	if !slices.Contains(got, `pbs_collector_success{collector="access"} 0`) {
+		t.Errorf("access collector does not report the filtered user list:\n%s", strings.Join(got, "\n"))
+	}
+	if !strings.Contains(logs.String(), "missing privilege Sys.Audit on /access/users") {
+		t.Errorf("no log about the missing privilege:\n%s", logs)
+	}
+}
+
+// A running backport kernel compares with the installed ones; a PBS without
+// current-kernel gives no series.
+func TestRebootRequiredKernels(t *testing.T) {
+	versions := `{"data":[{"Package":"proxmox-kernel-6.14.8-2-bpo12-pve-signed","OldVersion":"6.14.8-2"},
+		{"Package":"proxmox-kernel-6.14.11-4-bpo12-pve-signed","OldVersion":"6.14.11-4"}]}`
+	for name, tc := range map[string]struct {
+		status string
+		want   []string
+	}{
+		"older backport running": {`{"data":{"current-kernel":{"release":"6.14.8-2-bpo12-pve"},"memory":{},"swap":{},"root":{}}}`, []string{"pbs_reboot_required 1"}},
+		"newest running":         {`{"data":{"current-kernel":{"release":"6.14.11-4-bpo12-pve"},"memory":{},"swap":{},"root":{}}}`, []string{"pbs_reboot_required 0"}},
+		"no current-kernel":      {`{"data":{"memory":{},"swap":{},"root":{}}}`, nil},
+	} {
+		srv := newFakePBS(t, map[string]fakeResp{
+			"/api2/json/nodes/localhost/status":       {body: tc.status},
+			"/api2/json/nodes/localhost/apt/versions": {body: versions},
+		})
+		if got := seriesOf(t, testExporter(t, srv, ModuleConfig{}), "pbs_reboot_required"); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", name, got, tc.want)
+		}
 	}
 }

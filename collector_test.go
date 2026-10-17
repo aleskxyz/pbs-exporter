@@ -100,7 +100,7 @@ func TestCollectorFailureIsIsolated(t *testing.T) {
 		"/api2/json/nodes/localhost/status": {status: http.StatusInternalServerError, body: `{"data":null,"message":"boom"}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{})
-	compare(t, e, collectorStatus(map[string]float64{"apt": 0, "datastores": 1, "groups": 1, "jobs": 1, "node": 0, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1})+`
+	compare(t, e, collectorStatus(map[string]float64{"apt": 1, "datastores": 1, "groups": 1, "jobs": 1, "node": 0, "snapshots": 1, "sync": 1, "tasks": 1, "time": 1, "version": 1, "zfs": 1})+`
 # HELP pbs_up Was the last query of PBS successful (the version call).
 # TYPE pbs_up gauge
 pbs_up 1
@@ -108,8 +108,8 @@ pbs_up 1
 # TYPE pbs_datastore_available_bytes gauge
 pbs_datastore_available_bytes{datastore="store1"} 1000
 `, "pbs_collector_success", "pbs_up", "pbs_datastore_available_bytes", "pbs_host_cpu_usage_ratio")
-	// apt reads the running kernel from the same response and fails as well;
-	// the subscription of the node collector is still exported
+	// apt reads the running kernel from the same response, but leaves the
+	// failure to the node collector; its subscription is still exported
 	if n := testutil.CollectAndCount(e, "pbs_host_subscription_info"); n != 1 {
 		t.Errorf("pbs_host_subscription_info: %d series, want 1", n)
 	}

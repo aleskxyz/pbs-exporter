@@ -98,7 +98,9 @@ func collectAptUpdates(ctx context.Context, s *scrapeState, ch chan<- prometheus
 func collectRebootRequired(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 	st, err := s.getNodeStatus(ctx)
 	if err != nil {
-		return err
+		// the node collector reports it; without the running kernel there
+		// is nothing to compare
+		return nil
 	}
 	var versions []aptPackage
 	if err := s.api.get(ctx, apiPath("nodes", "localhost", "apt", "versions"), nil, &versions); err != nil {

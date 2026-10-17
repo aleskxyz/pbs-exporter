@@ -71,3 +71,44 @@ func parseSyncWorkerID(workerID string) (syncWorkerID, bool) {
 	}
 	return syncWorkerID{remote: remote, remoteStore: f[1], store: f[2], ns: f[3], jobID: f[4]}, true
 }
+
+// backupTaskKey is what the worker ID of a backup task says about its group:
+// "<store>:<type>/<id>", without the namespace.
+type backupTaskKey struct {
+	store, backupType, backupID string
+}
+
+func parseBackupWorkerID(workerID string) (backupTaskKey, bool) {
+	store, group, ok := strings.Cut(workerID, ":")
+	if !ok {
+		return backupTaskKey{}, false
+	}
+	backupType, backupID, ok := strings.Cut(group, "/")
+	if !ok || store == "" || backupType == "" || backupID == "" {
+		return backupTaskKey{}, false
+	}
+	return backupTaskKey{store, backupType, backupID}, true
+}
+
+// storeWorkerTypes have the datastore as first part of their worker ID.
+var storeWorkerTypes = map[string]bool{
+	// "sync" is a sync started by hand, its worker ID is the local datastore
+	"sync":   true,
+	"backup": true, "reader": true, "prune": true, "prunejob": true, "garbage_collection": true,
+	"verificationjob": true, "verify": true, "verify_group": true, "verify_snapshot": true,
+	"mount-device": true, "unmount-device": true, "create-datastore": true, "delete-datastore": true,
+	"move-group": true, "tape-backup": true, "tape-backup-job": true,
+}
+
+// taskStore returns the datastore a task worked on, "" if it has none.
+func taskStore(t taskItem) string {
+	if t.WorkerType == "syncjob" {
+		id, _ := parseSyncWorkerID(t.WorkerID)
+		return id.store
+	}
+	if storeWorkerTypes[t.WorkerType] {
+		store, _, _ := strings.Cut(t.WorkerID, ":")
+		return store
+	}
+	return ""
+}
