@@ -118,7 +118,7 @@ pbs_group_last_verify_timestamp_seconds{backup_id="200",backup_type="vm",datasto
 pbs_group_last_backup_encrypted{backup_id="100",backup_type="ct",datastore="store1",namespace_root="",pbs_namespace=""} 0
 pbs_group_last_backup_encrypted{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 0
 pbs_group_last_backup_encrypted{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0
-# HELP pbs_group_last_backup_task_success Whether the newest finished backup task of the backup group ended OK.
+# HELP pbs_group_last_backup_task_success Whether the newest finished backup task of the backup group ended without error (OK or with warnings).
 # TYPE pbs_group_last_backup_task_success gauge
 pbs_group_last_backup_task_success{backup_id="100",backup_type="vm",datastore="store1",namespace_root="",pbs_namespace=""} 1
 # HELP pbs_group_last_backup_task_end_timestamp_seconds End of the newest finished backup task of the backup group.

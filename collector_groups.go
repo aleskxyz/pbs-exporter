@@ -44,7 +44,7 @@ var (
 	groupBackupInterval = groupDesc("backup_interval_seconds",
 		"Typical time between snapshots of the backup group: the median of the gaps between its newest 4 snapshots; omitted below 3 snapshots.")
 	groupLastBackupTaskSuccess = groupDesc("last_backup_task_success",
-		"Whether the newest finished backup task of the backup group ended OK.")
+		"Whether the newest finished backup task of the backup group ended without error (OK or with warnings).")
 	groupLastBackupTaskEnd = groupDesc("last_backup_task_end_timestamp_seconds",
 		"End of the newest finished backup task of the backup group.")
 	groupLastBackupDuration = groupDesc("last_backup_duration_seconds",

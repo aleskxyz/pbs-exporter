@@ -33,7 +33,7 @@ type diskItem struct {
 var disksCollector = &collector{
 	name:      "disks",
 	enabled:   false,
-	privilege: "Sys.Audit on /system",
+	privilege: "Sys.Audit on /system/disks",
 	descs:     []*prometheus.Desc{diskSmartStatus, diskWearout},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		var disks []diskItem
