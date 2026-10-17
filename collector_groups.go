@@ -21,9 +21,9 @@ var (
 	groupSnapshots = groupDesc("snapshots",
 		"Number of snapshots of the backup group.")
 	groupLastBackupTimestamp = groupDesc("last_backup_timestamp_seconds",
-		"Time of the newest snapshot of the backup group.")
+		"Time of the newest finished snapshot of the backup group.")
 	groupLastBackupVerifyState = groupDesc("last_backup_verify_state",
-		"Verification state (ok, failed, none) of the newest snapshot of the backup group, always 1.", "state")
+		"Verification state (ok, failed, none) of the newest finished snapshot of the backup group, always 1.", "state")
 	groupInfo = groupDesc("info",
 		"Owner and comment (group notes, otherwise the notes of the newest snapshot) of the backup group, always 1.", "owner", "comment")
 )
@@ -106,12 +106,18 @@ var groupsCollector = &collector{
 			}
 			// the group list stays useful without the snapshots
 			snapshots, snapErr := s.getSnapshots(ctx, store, ns)
-			collectGroupMetrics(store, ns, groups, summarizeSnapshots(snapshots), ch)
+			var summaries map[groupKey]*groupSummary
+			if snapErr == nil {
+				summaries = summarizeSnapshots(snapshots)
+			}
+			collectGroupMetrics(store, ns, groups, summaries, ch)
 			return snapErr
 		})
 	},
 }
 
+// collectGroupMetrics exports the metrics of the groups of a namespace;
+// summaries is nil when the snapshot list could not be read.
 func collectGroupMetrics(store, ns string, groups []groupItem, summaries map[groupKey]*groupSummary, ch chan<- prometheus.Metric) {
 	root := namespaceRoot(ns)
 	seen := map[groupKey]bool{}
@@ -129,17 +135,28 @@ func collectGroupMetrics(store, ns string, groups []groupItem, summaries map[gro
 		summary := summaries[key]
 
 		gauge(groupSnapshots, float64(g.BackupCount))
-		// no series for a group without snapshots: 0 would read as 1970
-		if g.LastBackup > 0 {
-			gauge(groupLastBackupTimestamp, float64(g.LastBackup))
-		}
 		comment := g.Comment
-		if summary != nil && summary.newest != nil {
+		switch {
+		case summary != nil && summary.newest != nil:
+			gauge(groupLastBackupTimestamp, float64(summary.newest.BackupTime))
 			gauge(groupLastBackupVerifyState, 1, verifyState(*summary.newest))
 			if comment == "" {
 				comment = summary.newest.Comment
 			}
+		case summaries == nil:
+			// without the snapshot list, the group list tells the newest
+			// finished snapshot only for groups with more than one: the only
+			// snapshot of a group may still be running
+			if g.LastBackup > 0 && g.BackupCount > 1 {
+				gauge(groupLastBackupTimestamp, float64(g.LastBackup))
+			}
+			if comment == "" {
+				// the notes of the newest snapshot are unknown; a series with
+				// an empty comment would replace the usual one for a scrape
+				continue
+			}
 		}
+		// no timestamp for a group without finished snapshot: 0 reads as 1970
 		gauge(groupInfo, 1, g.Owner, comment)
 	}
 }
