@@ -31,11 +31,13 @@ var (
 
 // zfsPool is an entry of /nodes/localhost/disks/zfs.
 type zfsPool struct {
-	Name   string   `json:"name"`
-	Health string   `json:"health"`
-	Size   int64    `json:"size"`
-	Alloc  int64    `json:"alloc"`
-	Frag   *float64 `json:"frag"`
+	Name   string `json:"name"`
+	Health string `json:"health"`
+	Size   int64  `json:"size"`
+	Alloc  int64  `json:"alloc"`
+	// Frag is always set by current PBS, which leaves out pools without it;
+	// it is optional here to not export 0 should that change.
+	Frag *float64 `json:"frag"`
 }
 
 var zfsCollector = &collector{

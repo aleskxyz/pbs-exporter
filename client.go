@@ -98,18 +98,19 @@ func (c *apiClient) get(ctx context.Context, path string, q url.Values, out any)
 	return err
 }
 
-// requestTimes records when a request was written and when the first byte
-// of the answer arrived; the hooks run in the transport's goroutines.
+// requestTimes records when the request got its connection (after DNS,
+// TCP connect and TLS handshake) and when the first byte of the answer
+// arrived; the hooks run in the transport's goroutines.
 type requestTimes struct {
-	mu               sync.Mutex
-	wrote, firstByte time.Time
+	mu                 sync.Mutex
+	gotConn, firstByte time.Time
 }
 
 func (rt *requestTimes) trace() *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
-		WroteRequest: func(httptrace.WroteRequestInfo) {
+		GotConn: func(httptrace.GotConnInfo) {
 			rt.mu.Lock()
-			rt.wrote = time.Now()
+			rt.gotConn = time.Now()
 			rt.mu.Unlock()
 		},
 		GotFirstResponseByte: func() {
@@ -148,8 +149,8 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 		return sent, received, fmt.Errorf("%s: %w", path, err)
 	}
 	times.mu.Lock()
-	if !times.wrote.IsZero() && !times.firstByte.Before(times.wrote) {
-		sent, received = times.wrote, times.firstByte
+	if !times.gotConn.IsZero() && !times.firstByte.Before(times.gotConn) {
+		sent, received = times.gotConn, times.firstByte
 	}
 	times.mu.Unlock()
 	defer func() {
@@ -159,7 +160,7 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 			slog.Debug("closing response body", "err", sanitize(err.Error()))
 		}
 	}()
-	slog.Debug("response", "url", sanitize(u), "status", resp.StatusCode, "duration", received.Sub(sent))
+	slog.Debug("response", "url", sanitize(u), "status", resp.StatusCode, "ttfb", received.Sub(sent))
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))

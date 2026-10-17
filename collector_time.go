@@ -9,7 +9,7 @@ import (
 
 var nodeTimeOffset = prometheus.NewDesc(
 	prometheus.BuildFQName(promNamespace, "node", "time_offset_seconds"),
-	"Clock of the PBS node minus the clock of the exporter, accurate to about a second plus half the round trip.",
+	"Clock of the PBS node minus the clock of the exporter, accurate to about half a second plus half the round trip.",
 	nil, nil,
 )
 

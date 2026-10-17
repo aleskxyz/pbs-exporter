@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,20 +42,44 @@ pbs_zfs_pool_fragmentation_ratio{pool="rpool"} 0.2
 // UTC+1 zone has an offset of 600s, not 4200s. The fake answers after 400ms,
 // which must not count as offset.
 func TestNodeTimeOffset(t *testing.T) {
-	now := time.Now().Unix() + 600
-	srv := newFakePBS(t, map[string]fakeResp{
-		"/api2/json/nodes/localhost/time": {
-			body:  fmt.Sprintf(`{"data":{"time":%d,"localtime":%d,"timezone":"Europe/London\n"}}`, now, now+3600),
-			delay: 400 * time.Millisecond,
-		},
-	})
+	srv := &fakeServer{}
+	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/localhost/time" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(400 * time.Millisecond)
+		now := time.Now().Unix() + 600
+		_, _ = fmt.Fprintf(w, `{"data":{"time":%d,"localtime":%d,"timezone":"Europe/London\n"}}`, now, now+3600)
+	}))
+	t.Cleanup(srv.Close)
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
 	got := gaugeValue(t, e, "pbs_node_time_offset_seconds")
-	// "time" has whole seconds (taken at the start of the test, then +0.5s
-	// as the expected middle of that second), the midpoint of the round trip
-	// is 200ms after the request was sent
-	if got < 599.2 || got > 600.4 {
+	// the node answers 200ms after the middle of the round trip, with its
+	// time cut to the second: 600s + (-0.5s, 0.5s] + 0.2s
+	if got < 599.5 || got > 600.9 {
 		t.Errorf("offset = %.3fs, want about 600s", got)
+	}
+}
+
+// Connecting (here: a dial that takes 500ms) does not count as round trip.
+func TestRoundTripWithoutConnecting(t *testing.T) {
+	srv := newFakePBS(t, nil)
+	m := testModule(t, srv, ModuleConfig{})
+	tr := m.client.Transport.(*http.Transport)
+	dial := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		time.Sleep(500 * time.Millisecond)
+		return dial(ctx, network, addr)
+	}
+	api := NewExporter(context.Background(), srv.URL, m, 5*time.Second).api
+	var v versionResponse
+	sent, received, err := api.getTimed(context.Background(), apiPath("version"), nil, &v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := received.Sub(sent); d > 300*time.Millisecond {
+		t.Errorf("round trip %s includes connecting", d)
 	}
 }
 
