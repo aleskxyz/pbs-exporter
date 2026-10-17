@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -13,8 +12,8 @@ import (
 var (
 	syncJobInfo = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "sync_job", "info"),
-		"Settings of a sync job, always 1. With source=\"tasks\" only remote and remote_store are known.",
-		[]string{"job_id", "store", "pbs_namespace", "source", "remote", "remote_store", "remote_ns",
+		"Settings of a sync job, always 1. With source=\"tasks\" only datastore, pbs_namespace, remote and remote_store are known.",
+		[]string{"job_id", "datastore", "pbs_namespace", "source", "remote", "remote_store", "remote_ns",
 			"sync_direction", "remove_vanished", "transfer_last", "group_filter", "schedule"}, nil,
 	)
 	remoteInfo = prometheus.NewDesc(
@@ -44,12 +43,18 @@ type remoteConfig struct {
 	Host string `json:"host"`
 }
 
-// hasRemoteAudit reports whether the permissions of /access/permissions grant
-// Remote.Audit on /remote itself (also when propagated from "/"), so that
-// /admin/sync lists the jobs of all remotes. Remote.Audit on a single
-// remote (/remote/<name>) only shows the jobs of that remote.
-func hasRemoteAudit(perms map[string]map[string]any) bool {
-	_, ok := perms["/remote"]["Remote.Audit"]
+// hasRemoteAudit reports whether the token has Remote.Audit on /remote and
+// it propagates to the remotes below (also when granted on "/"), so that
+// /admin/sync lists the jobs of all remotes. Remote.Audit on a single remote
+// (/remote/<name>) only shows the jobs of that remote.
+func (p permissions) hasRemoteAudit() bool {
+	return p["/remote"]["Remote.Audit"]
+}
+
+// canAuditRemote reports whether the token has Remote.Audit on the given
+// remote itself.
+func (p permissions) canAuditRemote(remote string) bool {
+	_, ok := p["/remote/"+remote]["Remote.Audit"]
 	return ok
 }
 
@@ -62,24 +67,25 @@ var syncCollector = &collector{
 		syncJobInfo, remoteInfo,
 	},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
-		// the map values are the propagate flags, a listed privilege is granted
-		var perms map[string]map[string]any
-		if err := s.api.get(ctx, apiPath("access", "permissions"), nil, &perms); err != nil {
-			return err
-		}
 		// PBS leaves out the jobs and remotes the token may not see, without
-		// an error: jobs between local datastores need no Remote.Audit, the
-		// jobs of a remote need it on that remote
-		configured, err := collectSyncJobs(ctx, s, ch)
-		errs := []error{err, collectRemotes(ctx, s, ch)}
-		if !hasRemoteAudit(perms) {
-			hidden, err := collectSyncJobsFromTasks(ctx, s, ch, configured)
+		// an error: the jobs of a remote need Remote.Audit on that remote
+		configured, jobsErr := collectSyncJobs(ctx, s, ch)
+		errs := []error{jobsErr, collectRemotes(ctx, s, ch)}
+		perms, permsErr := s.getPermissions(ctx)
+		switch {
+		case permsErr != nil:
+			// without the permissions, hidden jobs can not be told apart
+			errs = append(errs, permsErr)
+		case jobsErr != nil:
+			// without the job list, every job in the task log would look hidden
+		case !perms.hasRemoteAudit():
+			hidden, err := collectSyncJobsFromTasks(ctx, s, ch, configured, perms)
 			errs = append(errs, err)
 			if hidden > 0 {
 				errs = append(errs, fmt.Errorf("missing privilege Remote.Audit on /remote: %d sync jobs are not readable, their last run is taken from the task log", hidden))
 			}
 		}
-		return errors.Join(errs...)
+		return joinUnique(errs...)
 	},
 }
 
@@ -104,7 +110,7 @@ func collectSyncJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.M
 			j.ID, j.Store, j.Namespace, "config", j.Remote, j.RemoteStore, j.RemoteNS,
 			direction, optBool(j.RemoveVanished), optInt(j.TransferLast), strings.Join(j.GroupFilter, ","), j.Schedule)
 	}
-	return ids, errors.Join(errs...)
+	return ids, joinUnique(errs...)
 }
 
 func collectRemotes(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -118,13 +124,15 @@ func collectRemotes(ctx context.Context, s *scrapeState, ch chan<- prometheus.Me
 	return nil
 }
 
-// collectSyncJobsFromTasks derives the last run of each sync job that is not
-// in configured from its newest syncjob task, and returns how many it found.
-// The next run and the settings stay unknown, and a job whose last run is
-// older than the task log is not seen.
-func collectSyncJobsFromTasks(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric, configured map[string]bool) (int, error) {
+// collectSyncJobsFromTasks derives the last run of each hidden sync job from
+// its newest syncjob task, and returns how many it found. A job is hidden if
+// it is not in configured and its remote is one the token can not audit; a
+// job of a remote the token can audit, or between local datastores, that is
+// not listed was deleted. The next run and the settings stay unknown, and a
+// job whose last run is older than the task log is not seen.
+func collectSyncJobsFromTasks(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric, configured map[string]bool, perms permissions) (int, error) {
 	tasks, err := s.getTasks(ctx)
-	if err != nil {
+	if !usableTasks(err) {
 		return 0, err
 	}
 	newest := map[string]taskItem{}
@@ -134,7 +142,7 @@ func collectSyncJobsFromTasks(ctx context.Context, s *scrapeState, ch chan<- pro
 			continue
 		}
 		id, ok := parseSyncWorkerID(t.WorkerID)
-		if !ok || configured[id.jobID] {
+		if !ok || configured[id.jobID] || id.remote == "" || perms.canAuditRemote(id.remote) {
 			continue
 		}
 		if prev, seen := newest[id.jobID]; !seen || t.StartTime > prev.StartTime {
@@ -149,5 +157,5 @@ func collectSyncJobsFromTasks(ctx context.Context, s *scrapeState, ch chan<- pro
 		ch <- prometheus.MustNewConstMetric(syncJobInfo, prometheus.GaugeValue, 1,
 			jobID, id.store, id.ns, "tasks", id.remote, id.remoteStore, "", "", "", "", "", "")
 	}
-	return len(newest), nil
+	return len(newest), err
 }

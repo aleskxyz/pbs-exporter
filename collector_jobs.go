@@ -10,14 +10,14 @@ import (
 
 // jobLabels identify a job. source is "config" for jobs read from the job
 // endpoints and "tasks" for sync jobs derived from the task log.
-var jobLabels = []string{"job_type", "job_id", "store", "pbs_namespace", "source"}
+var jobLabels = []string{"job_type", "job_id", "datastore", "pbs_namespace", "source"}
 
 func jobDesc(name, help string) *prometheus.Desc {
 	return prometheus.NewDesc(prometheus.BuildFQName(promNamespace, "job", name), help, jobLabels, nil)
 }
 
 var (
-	jobLastRunSuccess  = jobDesc("last_run_success", "Whether the last run of the job ended OK.")
+	jobLastRunSuccess  = jobDesc("last_run_success", "Whether the last run of the job ended without error (OK or with warnings).")
 	jobLastRunEnd      = jobDesc("last_run_end_timestamp_seconds", "End of the last run of the job.")
 	jobNextRun         = jobDesc("next_run_timestamp_seconds", "Next scheduled run of the job.")
 	jobInterval        = jobDesc("interval_seconds", "Time between the start of the last run and the next run of the job.")
@@ -26,12 +26,12 @@ var (
 	verifyJobInfo = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "verify_job", "info"),
 		"Settings of a verify job, always 1.",
-		[]string{"job_id", "store", "pbs_namespace", "outdated_after", "ignore_verified", "max_depth", "schedule"}, nil,
+		[]string{"job_id", "datastore", "pbs_namespace", "outdated_after", "ignore_verified", "max_depth", "schedule"}, nil,
 	)
 	pruneJobKeep = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "prune_job", "keep"),
 		"Retention setting of a prune job.",
-		[]string{"job_id", "store", "pbs_namespace", "keep"}, nil,
+		[]string{"job_id", "datastore", "pbs_namespace", "keep"}, nil,
 	)
 )
 
@@ -75,7 +75,7 @@ func (s *scrapeState) withPreviousRun(ctx context.Context, run jobRun) (jobRun, 
 		return run, nil
 	}
 	tasks, err := s.getTasks(ctx)
-	if err != nil {
+	if !usableTasks(err) {
 		return run, err
 	}
 	var prev *taskItem
@@ -88,7 +88,7 @@ func (s *scrapeState) withPreviousRun(ctx context.Context, run jobRun) (jobRun, 
 	if prev != nil {
 		run.state, run.end, run.duration = prev.Status, prev.EndTime, prev.EndTime-prev.StartTime
 	}
-	return run, nil
+	return run, err
 }
 
 // collectJobRun exports the run metrics of a job. Values PBS does not report
@@ -99,7 +99,7 @@ func collectJobRun(ch chan<- prometheus.Metric, run jobRun, labels ...string) {
 	}
 	if run.state != "" {
 		success := 0.0
-		if run.state == "OK" {
+		if succeeded(run.state) {
 			success = 1
 		}
 		gauge(jobLastRunSuccess, success)
@@ -110,7 +110,7 @@ func collectJobRun(ch chan<- prometheus.Metric, run jobRun, labels ...string) {
 	if run.next > 0 {
 		gauge(jobNextRun, float64(run.next))
 	}
-	if run.next > 0 && run.start > 0 && run.next > run.start {
+	if run.start > 0 && run.next > run.start {
 		gauge(jobInterval, float64(run.next-run.start))
 	}
 	duration := run.duration
@@ -218,7 +218,7 @@ func collectVerifyJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus
 		ch <- prometheus.MustNewConstMetric(verifyJobInfo, prometheus.GaugeValue, 1,
 			j.ID, j.Store, j.Namespace, optInt(j.OutdatedAfter), optBool(j.IgnoreVerified), optInt(j.MaxDepth), j.Schedule)
 	}
-	return errors.Join(errs...)
+	return joinUnique(errs...)
 }
 
 func collectPruneJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -226,16 +226,28 @@ func collectPruneJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.
 	if err := s.api.get(ctx, apiPath("admin", "prune"), nil, &jobs); err != nil {
 		return err
 	}
+	// the tasks of a prune job are named after its datastore and namespace,
+	// not after the job, so they tell jobs on the same namespace apart
+	type namespaceKey struct{ store, ns string }
+	jobsPerNamespace := map[namespaceKey]int{}
+	for _, j := range jobs {
+		jobsPerNamespace[namespaceKey{j.Store, j.Namespace}]++
+	}
 	var errs []error
 	for _, j := range jobs {
-		run, err := s.withPreviousRun(ctx, j.run())
+		run := j.run()
+		if jobsPerNamespace[namespaceKey{j.Store, j.Namespace}] > 1 {
+			// a running job's previous run could be another job's run
+			run.workerType = ""
+		}
+		run, err := s.withPreviousRun(ctx, run)
 		errs = append(errs, err)
 		collectJobRun(ch, run, "prune", j.ID, j.Store, j.Namespace, "config")
 		for keep, v := range j.set() {
 			ch <- prometheus.MustNewConstMetric(pruneJobKeep, prometheus.GaugeValue, float64(v), j.ID, j.Store, j.Namespace, keep)
 		}
 	}
-	return errors.Join(errs...)
+	return joinUnique(errs...)
 }
 
 func collectGCJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -245,19 +257,42 @@ func collectGCJobs(ctx context.Context, s *scrapeState, ch chan<- prometheus.Met
 	}
 	var errs []error
 	for _, j := range jobs {
-		start, _ := parseUPIDStart(j.UPID)
-		run := jobRun{state: j.LastRunState, start: start, end: j.LastRunEnd, next: j.NextRun, duration: -1}
-		if j.Duration != nil {
-			run.duration = *j.Duration
-		}
-		if j.LastRunState == "" {
-			// running: the previous run is the newest finished GC task
-			run.workerType, run.workerID, run.duration = "garbage_collection", j.Store, -1
-		}
-		run, err := s.withPreviousRun(ctx, run)
+		run, err := s.gcRun(ctx, j)
 		errs = append(errs, err)
 		// GC runs per datastore, the store is its job ID
 		collectJobRun(ch, run, "gc", j.Store, j.Store, "", "config")
 	}
-	return errors.Join(errs...)
+	return joinUnique(errs...)
+}
+
+// gcRun returns the last run of the garbage collection of a datastore. The
+// GC status PBS reports (UPID, duration) is the one of the last successful
+// run; the state and end time are the ones of the last run.
+func (s *scrapeState) gcRun(ctx context.Context, j gcJob) (jobRun, error) {
+	run := jobRun{state: j.LastRunState, end: j.LastRunEnd, next: j.NextRun, duration: -1}
+	switch {
+	case j.LastRunState == "":
+		// running: the previous run is the newest finished GC task. Its
+		// start is not the last start, and PBS computes the next run from
+		// now, so there is no interval (start stays 0).
+		run.workerType, run.workerID = "garbage_collection", j.Store
+		return s.withPreviousRun(ctx, run)
+	case succeeded(j.LastRunState):
+		run.start, _ = parseUPIDStart(j.UPID)
+		if j.Duration != nil {
+			run.duration = *j.Duration
+		}
+		return run, nil
+	}
+	// failed: the start is the one of the GC task that ended at the end time
+	tasks, err := s.getTasks(ctx)
+	if !usableTasks(err) {
+		return run, err
+	}
+	for _, t := range tasks {
+		if t.WorkerType == "garbage_collection" && t.WorkerID == j.Store && t.EndTime == j.LastRunEnd {
+			run.start = t.StartTime
+		}
+	}
+	return run, err
 }

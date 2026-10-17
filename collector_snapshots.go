@@ -54,7 +54,7 @@ func (s *scrapeState) getSnapshots(ctx context.Context, store, ns string) ([]sna
 // concurrently. Datastores that turn out to be unavailable are skipped.
 func (s *scrapeState) forEachNamespace(ctx context.Context, f func(store, ns string) error) error {
 	stores, storesErr := s.readableDatastores(ctx)
-	err := forEach(stores, s.maxConcurrency, func(store string) error {
+	err := forEach(stores, s.module.maxConcurrency, func(store string) error {
 		namespaces, err := s.getNamespaces(ctx, store)
 		if isDatastoreUnavailable(err) {
 			slog.Info("skipping unavailable datastore", "datastore", sanitize(store), "err", sanitize(err.Error()))
@@ -63,7 +63,7 @@ func (s *scrapeState) forEachNamespace(ctx context.Context, f func(store, ns str
 		if err != nil {
 			return err
 		}
-		return forEach(namespaces, s.maxConcurrency, func(ns namespaceItem) error {
+		return forEach(namespaces, s.module.maxConcurrency, func(ns namespaceItem) error {
 			err := f(store, ns.Namespace)
 			// the datastore may become unavailable after its namespaces were listed
 			if isDatastoreUnavailable(err) {

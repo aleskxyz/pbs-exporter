@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -17,7 +19,6 @@ var tasksRunning = prometheus.NewDesc(
 
 // taskItem is an entry of /nodes/localhost/tasks.
 type taskItem struct {
-	UPID       string `json:"upid"`
 	WorkerType string `json:"worker_type"`
 	WorkerID   string `json:"worker_id"`
 	User       string `json:"user"`
@@ -31,9 +32,66 @@ func (t taskItem) finished() bool {
 	return t.EndTime > 0 && t.Status != ""
 }
 
+// succeeded reports whether a task or job run ended without error; a run
+// with warnings ("WARNINGS: n") ended, as PBS treats it, successfully.
+func succeeded(status string) bool {
+	return status == "OK" || strings.HasPrefix(status, "WARNINGS")
+}
+
+// errTaskLogFiltered is returned with the task log when the token lacks
+// Sys.Audit on /system/tasks: PBS then lists only the token's own tasks,
+// without an error.
+var errTaskLogFiltered = errors.New("missing privilege Sys.Audit on /system/tasks: the task log only shows the tasks of the API token, metrics taken from it are incomplete")
+
+// permissions are the privileges of the token per ACL path, as listed by
+// /access/permissions; the value tells whether a privilege propagates to the
+// paths below.
+type permissions map[string]map[string]bool
+
+// getPermissions returns the privileges of the token, read once per scrape.
+func (s *scrapeState) getPermissions(ctx context.Context) (permissions, error) {
+	return s.permissions.get(struct{}{}, func() (permissions, error) {
+		var out permissions
+		err := s.api.get(ctx, apiPath("access", "permissions"), nil, &out)
+		return out, err
+	})
+}
+
+// canAuditTasks reports whether the token sees all tasks: Sys.Audit on
+// /system/tasks itself, or propagated from /system (or "/").
+func (p permissions) canAuditTasks() bool {
+	if _, ok := p["/system/tasks"]["Sys.Audit"]; ok {
+		return true
+	}
+	return p["/system"]["Sys.Audit"]
+}
+
+// taskLogFiltered returns errTaskLogFiltered if the task log of the token is
+// incomplete. If the permissions can not be read, that is not known.
+func (s *scrapeState) taskLogFiltered(ctx context.Context) error {
+	if perms, err := s.getPermissions(ctx); err == nil && !perms.canAuditTasks() {
+		return errTaskLogFiltered
+	}
+	return nil
+}
+
 // getTasks returns the tasks of the last task_lookback, at most task_limit.
-// The task log is read once per scrape.
+// The task log is read once per scrape. With errTaskLogFiltered, the tasks
+// are returned as well, but are incomplete.
 func (s *scrapeState) getTasks(ctx context.Context) ([]taskItem, error) {
+	tasks, err := s.getAllTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tasks, s.taskLogFiltered(ctx)
+}
+
+// usableTasks reports whether getTasks returned tasks to work with.
+func usableTasks(err error) bool {
+	return err == nil || errors.Is(err, errTaskLogFiltered)
+}
+
+func (s *scrapeState) getAllTasks(ctx context.Context) ([]taskItem, error) {
 	return s.tasks.get(struct{}{}, func() ([]taskItem, error) {
 		q := url.Values{
 			"since": {strconv.FormatInt(s.now.Add(-s.module.taskLookback).Unix(), 10)},
@@ -69,6 +127,6 @@ var tasksCollector = &collector{
 		for workerType, n := range counts {
 			ch <- prometheus.MustNewConstMetric(tasksRunning, prometheus.GaugeValue, float64(n), workerType)
 		}
-		return nil
+		return s.taskLogFiltered(ctx)
 	},
 }

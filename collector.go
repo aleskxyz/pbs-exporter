@@ -168,9 +168,8 @@ func forEach[T any](items []T, limit int, f func(T) error) error {
 // scrapeState holds the state of one scrape: the API client and the responses
 // that more than one collector uses, so that each is fetched only once.
 type scrapeState struct {
-	api            *apiClient
-	module         *Module
-	maxConcurrency int
+	api    *apiClient
+	module *Module
 	// now is when the scrape started
 	now time.Time
 
@@ -179,6 +178,7 @@ type scrapeState struct {
 	namespaces     memo[string, []namespaceItem]
 	snapshots      memo[storeNamespace, []snapshotItem]
 	tasks          memo[struct{}, []taskItem]
+	permissions    memo[struct{}, permissions]
 }
 
 type storeNamespace struct {
@@ -259,7 +259,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(e.ctx, e.timeout)
 	defer cancel()
 
-	s := &scrapeState{api: e.api, module: e.module, maxConcurrency: e.module.maxConcurrency, now: time.Now()}
+	s := &scrapeState{api: e.api, module: e.module, now: time.Now()}
 	collectors := e.module.collectors
 	errs := make([]error, len(collectors))
 	durations := make([]time.Duration, len(collectors))
@@ -297,6 +297,21 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 // stop the exporter.
 func runCollector(ctx context.Context, c *collector, s *scrapeState, ch chan<- prometheus.Metric) error {
 	return recoverErr(func() error { return c.collect(ctx, s, ch) })
+}
+
+// joinUnique joins errors like errors.Join, but each message only once: a
+// shared response that failed is reported once, not by every user.
+func joinUnique(errs ...error) error {
+	seen := map[string]bool{}
+	var out []error
+	for _, err := range errs {
+		if err == nil || seen[err.Error()] {
+			continue
+		}
+		seen[err.Error()] = true
+		out = append(out, err)
+	}
+	return errors.Join(out...)
 }
 
 // recoverErr calls f and returns a panic in f as an error.

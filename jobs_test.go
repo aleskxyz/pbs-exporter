@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -50,48 +52,48 @@ func TestJobMetrics(t *testing.T) {
 	srv := newFakePBS(t, nil)
 	e := testExporter(t, srv, ModuleConfig{})
 	compare(t, e, `
-# HELP pbs_job_last_run_success Whether the last run of the job ended OK.
+# HELP pbs_job_last_run_success Whether the last run of the job ended without error (OK or with warnings).
 # TYPE pbs_job_last_run_success gauge
-pbs_job_last_run_success{job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config",store="store1"} 0
-pbs_job_last_run_success{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 1
-pbs_job_last_run_success{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1
-pbs_job_last_run_success{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 1
+pbs_job_last_run_success{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config"} 0
+pbs_job_last_run_success{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 1
+pbs_job_last_run_success{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1
+pbs_job_last_run_success{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 1
 # HELP pbs_job_last_run_end_timestamp_seconds End of the last run of the job.
 # TYPE pbs_job_last_run_end_timestamp_seconds gauge
-pbs_job_last_run_end_timestamp_seconds{job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config",store="store1"} 1700000060
-pbs_job_last_run_end_timestamp_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 1700000300
-pbs_job_last_run_end_timestamp_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1700001000
-pbs_job_last_run_end_timestamp_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 1700003600
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config"} 1700000060
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 1700000300
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1700001000
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 1700003600
 # HELP pbs_job_next_run_timestamp_seconds Next scheduled run of the job.
 # TYPE pbs_job_next_run_timestamp_seconds gauge
-pbs_job_next_run_timestamp_seconds{job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config",store="store1"} 1700086400
-pbs_job_next_run_timestamp_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 1700003600
-pbs_job_next_run_timestamp_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1700604800
-pbs_job_next_run_timestamp_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 1700604800
-pbs_job_next_run_timestamp_seconds{job_id="v-2",job_type="verify",pbs_namespace="site-a",source="config",store="store1"} 1700100000
+pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config"} 1700086400
+pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 1700003600
+pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1700604800
+pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 1700604800
+pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="v-2",job_type="verify",pbs_namespace="site-a",source="config"} 1700100000
 # HELP pbs_job_interval_seconds Time between the start of the last run and the next run of the job.
 # TYPE pbs_job_interval_seconds gauge
-pbs_job_interval_seconds{job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config",store="store1"} 86400
-pbs_job_interval_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 3600
-pbs_job_interval_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 604800
-pbs_job_interval_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 604800
+pbs_job_interval_seconds{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config"} 86400
+pbs_job_interval_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 3600
+pbs_job_interval_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 604800
+pbs_job_interval_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 604800
 # HELP pbs_job_last_run_duration_seconds Duration of the last run of the job.
 # TYPE pbs_job_last_run_duration_seconds gauge
-pbs_job_last_run_duration_seconds{job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config",store="store1"} 60
-pbs_job_last_run_duration_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 300
-pbs_job_last_run_duration_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1000
-pbs_job_last_run_duration_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 3600
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="site-a",source="config"} 60
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 300
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1000
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 3600
 # HELP pbs_verify_job_info Settings of a verify job, always 1.
 # TYPE pbs_verify_job_info gauge
-pbs_verify_job_info{ignore_verified="true",job_id="v-1",max_depth="",outdated_after="30",pbs_namespace="",schedule="sat 02:00",store="store1"} 1
-pbs_verify_job_info{ignore_verified="",job_id="v-2",max_depth="",outdated_after="",pbs_namespace="site-a",schedule="daily",store="store1"} 1
+pbs_verify_job_info{datastore="store1",ignore_verified="true",job_id="v-1",max_depth="",outdated_after="30",pbs_namespace="",schedule="sat 02:00"} 1
+pbs_verify_job_info{datastore="store1",ignore_verified="",job_id="v-2",max_depth="",outdated_after="",pbs_namespace="site-a",schedule="daily"} 1
 # HELP pbs_prune_job_keep Retention setting of a prune job.
 # TYPE pbs_prune_job_keep gauge
-pbs_prune_job_keep{job_id="p-1",keep="daily",pbs_namespace="site-a",store="store1"} 7
-pbs_prune_job_keep{job_id="p-1",keep="last",pbs_namespace="site-a",store="store1"} 3
-# HELP pbs_sync_job_info Settings of a sync job, always 1. With source="tasks" only remote and remote_store are known.
+pbs_prune_job_keep{datastore="store1",job_id="p-1",keep="daily",pbs_namespace="site-a"} 7
+pbs_prune_job_keep{datastore="store1",job_id="p-1",keep="last",pbs_namespace="site-a"} 3
+# HELP pbs_sync_job_info Settings of a sync job, always 1. With source="tasks" only datastore, pbs_namespace, remote and remote_store are known.
 # TYPE pbs_sync_job_info gauge
-pbs_sync_job_info{group_filter="type:vm,regex:^1",job_id="s-1",pbs_namespace="site-a",remote="pbs-b",remote_ns="site-a",remote_store="main",remove_vanished="true",schedule="hourly",source="config",store="store1",sync_direction="pull",transfer_last="2"} 1
+pbs_sync_job_info{datastore="store1",group_filter="type:vm,regex:^1",job_id="s-1",pbs_namespace="site-a",remote="pbs-b",remote_ns="site-a",remote_store="main",remove_vanished="true",schedule="hourly",source="config",sync_direction="pull",transfer_last="2"} 1
 # HELP pbs_remote_info A remote PBS that sync jobs read from or write to, always 1.
 # TYPE pbs_remote_info gauge
 pbs_remote_info{host="pbs-b.example.org",remote="pbs-b"} 1
@@ -110,28 +112,28 @@ pbs_tasks_running{worker_type="syncjob"} 1
 func TestSyncJobsWithoutRemoteAudit(t *testing.T) {
 	logs := captureLogs(t)
 	srv := newFakePBS(t, map[string]fakeResp{
-		"/api2/json/access/permissions":            {body: `{"data":{"/":{"Datastore.Audit":true},"/remote":{"Datastore.Audit":true,"Sys.Audit":true}}}`},
+		"/api2/json/access/permissions":            {body: `{"data":{"/":{"Datastore.Audit":true},"/remote":{"Datastore.Audit":true,"Sys.Audit":true},"/system":{"Sys.Audit":true}}}`},
 		"/api2/json/admin/sync?sync-direction=all": {body: `{"data":[]}`},
 		"/api2/json/config/remote":                 {body: `{"data":[]}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
 	compare(t, e, `
-# HELP pbs_job_last_run_success Whether the last run of the job ended OK.
+# HELP pbs_job_last_run_success Whether the last run of the job ended without error (OK or with warnings).
 # TYPE pbs_job_last_run_success gauge
-pbs_job_last_run_success{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks",store="store1"} 0
-pbs_job_last_run_success{job_id="s-2",job_type="sync",pbs_namespace="",source="tasks",store="store1"} 1
+pbs_job_last_run_success{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks"} 0
+pbs_job_last_run_success{datastore="store1",job_id="s-2",job_type="sync",pbs_namespace="",source="tasks"} 1
 # HELP pbs_job_last_run_end_timestamp_seconds End of the last run of the job.
 # TYPE pbs_job_last_run_end_timestamp_seconds gauge
-pbs_job_last_run_end_timestamp_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks",store="store1"} 1700110100
-pbs_job_last_run_end_timestamp_seconds{job_id="s-2",job_type="sync",pbs_namespace="",source="tasks",store="store1"} 1700001060
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks"} 1700110100
+pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="s-2",job_type="sync",pbs_namespace="",source="tasks"} 1700001060
 # HELP pbs_job_last_run_duration_seconds Duration of the last run of the job.
 # TYPE pbs_job_last_run_duration_seconds gauge
-pbs_job_last_run_duration_seconds{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks",store="store1"} 100
-pbs_job_last_run_duration_seconds{job_id="s-2",job_type="sync",pbs_namespace="",source="tasks",store="store1"} 60
-# HELP pbs_sync_job_info Settings of a sync job, always 1. With source="tasks" only remote and remote_store are known.
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="tasks"} 100
+pbs_job_last_run_duration_seconds{datastore="store1",job_id="s-2",job_type="sync",pbs_namespace="",source="tasks"} 60
+# HELP pbs_sync_job_info Settings of a sync job, always 1. With source="tasks" only datastore, pbs_namespace, remote and remote_store are known.
 # TYPE pbs_sync_job_info gauge
-pbs_sync_job_info{group_filter="",job_id="s-1",pbs_namespace="site-a",remote="pbs-b",remote_ns="",remote_store="main",remove_vanished="",schedule="",source="tasks",store="store1",sync_direction="",transfer_last=""} 1
-pbs_sync_job_info{group_filter="",job_id="s-2",pbs_namespace="",remote="pbs-c",remote_ns="",remote_store="other",remove_vanished="",schedule="",source="tasks",store="store1",sync_direction="",transfer_last=""} 1
+pbs_sync_job_info{datastore="store1",group_filter="",job_id="s-1",pbs_namespace="site-a",remote="pbs-b",remote_ns="",remote_store="main",remove_vanished="",schedule="",source="tasks",sync_direction="",transfer_last=""} 1
+pbs_sync_job_info{datastore="store1",group_filter="",job_id="s-2",pbs_namespace="",remote="pbs-c",remote_ns="",remote_store="other",remove_vanished="",schedule="",source="tasks",sync_direction="",transfer_last=""} 1
 # HELP pbs_collector_success Whether a collector succeeded in the last scrape.
 # TYPE pbs_collector_success gauge
 pbs_collector_success{collector="datastores"} 1
@@ -150,18 +152,21 @@ pbs_collector_success{collector="version"} 1
 
 func TestHasRemoteAudit(t *testing.T) {
 	for name, tc := range map[string]struct {
-		perms map[string]map[string]any
+		perms permissions
 		want  bool
 	}{
-		"on /remote":      {map[string]map[string]any{"/remote": {"Remote.Audit": true}}, true},
-		"propagated":      {map[string]map[string]any{"/": {"Sys.Audit": true}, "/remote": {"Remote.Audit": false}}, true},
-		"one remote only": {map[string]map[string]any{"/remote": {"Sys.Audit": true}, "/remote/pbs-b": {"Remote.Audit": true}}, false},
-		"similar path":    {map[string]map[string]any{"/remotely-other": {"Remote.Audit": true}}, false},
-		"none":            {map[string]map[string]any{}, false},
+		"propagating":     {permissions{"/remote": {"Remote.Audit": true}}, true},
+		"not propagating": {permissions{"/remote": {"Remote.Audit": false}}, false},
+		"one remote only": {permissions{"/remote": {"Sys.Audit": true}, "/remote/pbs-b": {"Remote.Audit": true}}, false},
+		"similar path":    {permissions{"/remotely-other": {"Remote.Audit": true}}, false},
+		"none":            {permissions{}, false},
 	} {
-		if got := hasRemoteAudit(tc.perms); got != tc.want {
+		if got := tc.perms.hasRemoteAudit(); got != tc.want {
 			t.Errorf("%s: got %t, want %t", name, got, tc.want)
 		}
+	}
+	if p := (permissions{"/remote/pbs-b": {"Remote.Audit": false}}); !p.canAuditRemote("pbs-b") || p.canAuditRemote("pbs-c") {
+		t.Error("canAuditRemote")
 	}
 }
 
@@ -203,13 +208,13 @@ func TestTaskLogQuery(t *testing.T) {
 // the others come from the task log and the collector reports the gap.
 func TestSyncJobsWithPartialRemoteAudit(t *testing.T) {
 	srv := newFakePBS(t, map[string]fakeResp{
-		"/api2/json/access/permissions": {body: `{"data":{"/remote":{"Sys.Audit":true},"/remote/pbs-b":{"Remote.Audit":true}}}`},
+		"/api2/json/access/permissions": {body: `{"data":{"/remote":{"Sys.Audit":true},"/remote/pbs-b":{"Remote.Audit":true},"/system":{"Sys.Audit":true}}}`},
 	})
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
 	got := seriesOf(t, e, "pbs_job_last_run_success", "pbs_collector_success")
 	for _, want := range []string{
-		`pbs_job_last_run_success{job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config",store="store1"} 1`,
-		`pbs_job_last_run_success{job_id="s-2",job_type="sync",pbs_namespace="",source="tasks",store="store1"} 1`,
+		`pbs_job_last_run_success{datastore="store1",job_id="s-1",job_type="sync",pbs_namespace="site-a",source="config"} 1`,
+		`pbs_job_last_run_success{datastore="store1",job_id="s-2",job_type="sync",pbs_namespace="",source="tasks"} 1`,
 		`pbs_collector_success{collector="sync"} 0`,
 	} {
 		if !slices.Contains(got, want) {
@@ -227,7 +232,7 @@ func TestSyncJobsWithPartialRemoteAudit(t *testing.T) {
 // missing: the collector succeeds.
 func TestSyncWithoutRemoteJobs(t *testing.T) {
 	srv := newFakePBS(t, map[string]fakeResp{
-		"/api2/json/access/permissions":            {body: `{"data":{"/remote":{"Sys.Audit":true}}}`},
+		"/api2/json/access/permissions":            {body: `{"data":{"/remote":{"Sys.Audit":true},"/system":{"Sys.Audit":true}}}`},
 		"/api2/json/admin/sync?sync-direction=all": {body: `{"data":[]}`},
 		"/api2/json/config/remote":                 {body: `{"data":[]}`},
 		"/api2/json/nodes/localhost/tasks":         {body: `{"data":[]}`},
@@ -256,12 +261,12 @@ func TestRunningJobUsesPreviousRun(t *testing.T) {
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"sync": false}})
 	got := seriesOf(t, e, "pbs_job_last_run_success", "pbs_job_last_run_end_timestamp_seconds", "pbs_job_last_run_duration_seconds", "pbs_job_interval_seconds")
 	for _, want := range []string{
-		`pbs_job_last_run_success{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 0`,
-		`pbs_job_last_run_end_timestamp_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 1.6993988e+09`,
-		`pbs_job_last_run_duration_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 3600`,
-		`pbs_job_interval_seconds{job_id="v-1",job_type="verify",pbs_namespace="",source="config",store="store1"} 604800`,
-		`pbs_job_last_run_success{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1`,
-		`pbs_job_last_run_duration_seconds{job_id="store1",job_type="gc",pbs_namespace="",source="config",store="store1"} 1000`,
+		`pbs_job_last_run_success{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 1`,
+		`pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 1.6993988e+09`,
+		`pbs_job_last_run_duration_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 3600`,
+		`pbs_job_interval_seconds{datastore="store1",job_id="v-1",job_type="verify",pbs_namespace="",source="config"} 604800`,
+		`pbs_job_last_run_success{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1`,
+		`pbs_job_last_run_duration_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1000`,
 	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("missing %s in\n%s", want, strings.Join(got, "\n"))
@@ -285,5 +290,128 @@ func TestParseUPIDWorker(t *testing.T) {
 	}
 	if got, _ := parseSyncWorkerID("-:store2:store1::s-local"); got.remote != "" || got.remoteStore != "store2" {
 		t.Errorf("local sync job: %+v", got)
+	}
+}
+
+// GC: PBS's UPID and duration are the ones of the last successful run. While
+// a GC runs, the previous run comes from the task log and there is no
+// interval; after a failed run, its start comes from the task log.
+func TestGCRuns(t *testing.T) {
+	successful := `"upid":"UPID:pbs:00000001:00000002:00000004:6553F100:garbage_collection:store1:root@pam:","duration":1000`
+	tasks := `{"data":[
+		{"worker_type":"garbage_collection","worker_id":"store1","user":"root@pam","starttime":1700000000,"endtime":1700001000,"status":"OK"},
+		{"worker_type":"garbage_collection","worker_id":"store1","user":"root@pam","starttime":1700600000,"endtime":1700600500,"status":"disk full"},
+		{"worker_type":"garbage_collection","worker_id":"store1","user":"root@pam","starttime":1701200000}]}`
+	for name, tc := range map[string]struct {
+		gc   string
+		want []string
+	}{
+		"running": {`{"store":"store1","next-run":1701300000,` + successful + `}`, []string{
+			`pbs_job_last_run_duration_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 500`,
+			`pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1.7006005e+09`,
+			`pbs_job_last_run_success{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 0`,
+			`pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1.7013e+09`,
+		}},
+		"failed": {`{"store":"store1","last-run-state":"disk full","last-run-endtime":1700600500,"next-run":1701200000,` + successful + `}`, []string{
+			`pbs_job_interval_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 600000`,
+			`pbs_job_last_run_duration_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 500`,
+			`pbs_job_last_run_end_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1.7006005e+09`,
+			`pbs_job_last_run_success{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 0`,
+			`pbs_job_next_run_timestamp_seconds{datastore="store1",job_id="store1",job_type="gc",pbs_namespace="",source="config"} 1.7012e+09`,
+		}},
+	} {
+		srv := newFakePBS(t, map[string]fakeResp{
+			"/api2/json/admin/gc":              {body: `{"data":[` + tc.gc + `]}`},
+			"/api2/json/admin/verify":          {body: `{"data":[]}`},
+			"/api2/json/admin/prune":           {body: `{"data":[]}`},
+			"/api2/json/nodes/localhost/tasks": {body: tasks},
+		})
+		got := seriesOf(t, testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"sync": false}}),
+			"pbs_job_last_run_success", "pbs_job_last_run_end_timestamp_seconds", "pbs_job_next_run_timestamp_seconds",
+			"pbs_job_interval_seconds", "pbs_job_last_run_duration_seconds")
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got\n%s\nwant\n%s", name, strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+		}
+	}
+}
+
+// Prune job tasks are named after the datastore and namespace: while one of
+// two jobs on the same namespace runs, its previous run is not known.
+func TestRunningPruneJobsSharingANamespace(t *testing.T) {
+	running := `"last-run-upid":"UPID:pbs:00000001:00000002:00000009:6553F100:prunejob:store1:root@pam:","next-run":1700086400`
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/prune": {body: `{"data":[
+			{"id":"p-1","store":"store1","last-run-state":"OK","last-run-endtime":1699990000,"last-run-upid":"UPID:pbs:00000001:00000002:00000008:6553CAF0:prunejob:store1:root@pam:","next-run":1700086400},
+			{"id":"p-2","store":"store1",` + running + `},
+			{"id":"p-3","store":"store2",` + strings.ReplaceAll(running, "store1", "store2") + `}]}`},
+		"/api2/json/admin/verify": {body: `{"data":[]}`},
+		"/api2/json/admin/gc":     {body: `{"data":[]}`},
+		"/api2/json/nodes/localhost/tasks": {body: `{"data":[
+			{"worker_type":"prunejob","worker_id":"store1","user":"root@pam","starttime":1699990000,"endtime":1699990010,"status":"OK"},
+			{"worker_type":"prunejob","worker_id":"store2","user":"root@pam","starttime":1699990000,"endtime":1699990020,"status":"OK"}]}`},
+	})
+	got := seriesOf(t, testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"sync": false}}), "pbs_job_last_run_success")
+	want := []string{
+		`pbs_job_last_run_success{datastore="store1",job_id="p-1",job_type="prune",pbs_namespace="",source="config"} 1`,
+		`pbs_job_last_run_success{datastore="store2",job_id="p-3",job_type="prune",pbs_namespace="",source="config"} 1`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A sync job missing from the list is only taken from the task log when its
+// remote can not be audited; otherwise, and for local jobs, it was deleted.
+func TestDeletedSyncJobsAreNotHidden(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions":            {body: `{"data":{"/remote/pbs-b":{"Remote.Audit":true},"/system":{"Sys.Audit":true}}}`},
+		"/api2/json/admin/sync?sync-direction=all": {body: `{"data":[]}`},
+		"/api2/json/nodes/localhost/tasks": {body: `{"data":[
+			{"worker_type":"syncjob","worker_id":"pbs-b:main:store1:site-a:s-1","user":"root@pam","starttime":1700000000,"endtime":1700000300,"status":"OK"},
+			{"worker_type":"syncjob","worker_id":"-:store2:store1::s-local","user":"root@pam","starttime":1700000000,"endtime":1700000300,"status":"OK"}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
+	if got := seriesOf(t, e, "pbs_job_last_run_success"); len(got) != 0 {
+		t.Errorf("deleted jobs are reported: %v", got)
+	}
+	if got := seriesOf(t, e, "pbs_collector_success"); !slices.Contains(got, `pbs_collector_success{collector="sync"} 1`) {
+		t.Errorf("sync collector failed:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// Without Sys.Audit on /system/tasks, PBS lists only the token's own tasks
+// without an error; the collectors that use the task log report it.
+func TestFilteredTaskLog(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions": {body: `{"data":{"/":{"Datastore.Audit":true},"/remote":{"Remote.Audit":true}}}`},
+	})
+	got := seriesOf(t, testExporter(t, srv, ModuleConfig{}), "pbs_collector_success")
+	if !slices.Contains(got, `pbs_collector_success{collector="tasks"} 0`) {
+		t.Errorf("tasks collector does not report the filtered task log:\n%s", strings.Join(got, "\n"))
+	}
+	if !strings.Contains(logs.String(), "missing privilege Sys.Audit on /system/tasks") {
+		t.Errorf("no log about the missing privilege:\n%s", logs)
+	}
+}
+
+// When the permissions can not be read, the sync jobs are still exported.
+func TestSyncWithoutPermissions(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions": {status: http.StatusInternalServerError, body: `{"data":null,"message":"boom"}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"jobs": false}})
+	if got := seriesOf(t, e, "pbs_sync_job_info", "pbs_remote_info"); len(got) != 2 {
+		t.Errorf("got %v, want the sync job and the remote", got)
+	}
+}
+
+func TestJoinUnique(t *testing.T) {
+	a, b := errors.New("a"), errors.New("b")
+	if got := joinUnique(nil, a, b, errors.New("a"), nil); got == nil || got.Error() != "a\nb" {
+		t.Errorf("got %v", got)
+	}
+	if joinUnique(nil, nil) != nil {
+		t.Error("nil errors must give nil")
 	}
 }
