@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -199,15 +198,15 @@ type Exporter struct {
 	api     *apiClient
 }
 
-// NewExporter returns the collector of one scrape of endpoint with module.
+// NewExporter returns the collector of one scrape of the module's endpoint.
 // All PBS requests stop when ctx is done or after timeout, whichever is first.
-func NewExporter(ctx context.Context, endpoint string, module *Module, timeout time.Duration) *Exporter {
+func NewExporter(ctx context.Context, module *Module, timeout time.Duration) *Exporter {
 	return &Exporter{
 		ctx:     ctx,
 		timeout: timeout,
 		module:  module,
 		api: &apiClient{
-			endpoint:            endpoint,
+			endpoint:            module.endpoint,
 			authorizationHeader: module.authorizationHeader,
 			client:              module.client,
 			sem:                 module.sem,
@@ -268,7 +267,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(collectorDuration, prometheus.GaugeValue, durations[i].Seconds(), c.name)
 	}
 	ch <- prometheus.MustNewConstMetric(up, prometheus.GaugeValue, upValue)
-	ch <- prometheus.MustNewConstMetric(info, prometheus.GaugeValue, 1, e.module.name, endpointHost(e.api.endpoint))
+	ch <- prometheus.MustNewConstMetric(info, prometheus.GaugeValue, 1, e.module.name, e.module.host)
 }
 
 // runCollector runs c. A panic becomes an error, so a bad PBS answer can not
@@ -300,14 +299,4 @@ func recoverErr(f func() error) (err error) {
 		}
 	}()
 	return f()
-}
-
-// endpointHost returns the host of endpoint as label value, which must be
-// valid UTF-8.
-func endpointHost(endpoint string) string {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return ""
-	}
-	return strings.ToValidUTF8(u.Hostname(), "")
 }

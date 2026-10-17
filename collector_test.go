@@ -25,7 +25,7 @@ func testModule(t *testing.T, srv *fakeServer, mc ModuleConfig) *Module {
 
 func testExporter(t *testing.T, srv *fakeServer, mc ModuleConfig) *Exporter {
 	t.Helper()
-	return NewExporter(context.Background(), srv.URL, testModule(t, srv, mc), 10*time.Second)
+	return NewExporter(context.Background(), testModule(t, srv, mc), 10*time.Second)
 }
 
 // compare checks the given metrics of one scrape against the exposition text.
@@ -310,7 +310,7 @@ func TestMaxConcurrency(t *testing.T) {
 	for range 3 {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			_ = testutil.CollectAndCount(NewExporter(context.Background(), srv.URL, m, 10*time.Second))
+			_ = testutil.CollectAndCount(NewExporter(context.Background(), m, 10*time.Second))
 		}()
 	}
 	for range 3 {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -116,41 +117,54 @@ func TestConfigDefaults(t *testing.T) {
 func TestParseConfigErrors(t *testing.T) {
 	const mod = "modules:\n  a:\n" + validModule
 	for name, in := range map[string]string{
-		"empty":                ``,
-		"not a map":            `- a`,
-		"no modules":           "server:\n  log_level: info\n",
-		"old format":           "a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
-		"missing token":        "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n",
-		"missing user":         "modules:\n  a:\n    endpoint: https://pbs:8007\n    token_name: n\n    token_value: v\n",
-		"missing endpoint":     "modules:\n  a:\n    user: u\n    token_name: n\n    token_value: v\n",
-		"endpoint in defaults": "defaults:\n  endpoint: https://pbs:8007\n" + mod,
-		"two token sources":    mod + "    token_value_file: /run/secrets/a\n",
-		"defaults two tokens":  "defaults:\n  token_value: v\n  token_value_file: /f\n" + mod,
-		"unknown module key":   mod + "    verify_ssl: false\n",
-		"unknown server key":   "server:\n  port: 1\n" + mod,
-		"unknown section":      "global:\n  x: 1\n" + mod,
-		"bad log level":        "server:\n  log_level: verbose\n" + mod,
-		"bad metrics path":     "server:\n  metrics_path: metrics\n" + mod,
-		"zero scrape timeout":  "server:\n  scrape_timeout: 0s\n" + mod,
-		"neg offset":           "server:\n  scrape_timeout_offset: -1s\n" + mod,
-		"bad duration":         mod + "    timeout: soon\n",
-		"zero timeout":         mod + "    timeout: 0s\n",
-		"zero in defaults":     "defaults:\n  timeout: 0s\n" + mod,
-		"zero concurrency":     mod + "    max_concurrency: 0\n",
-		"neg task limit":       mod + "    task_limit: -1\n",
-		"day duration":         mod + "    task_lookback: 8d\n",
-		"unknown collector":    mod + "    collectors:\n      nope: true\n",
-		"disabled version":     "defaults:\n  collectors:\n    version: false\n" + mod,
-		"collectors list":      mod + "    collectors: [node]\n",
-		"bad endpoint":         "modules:\n  a:\n    endpoint: https://pbs:8007/api2\n    user: u\n    token_name: n\n    token_value: v\n",
-		"two documents":        mod + "---\nmodules:\n  b:\n" + validModule,
-		"duplicate module":     mod + "  a:\n" + validModule,
-		"empty name":           "modules:\n  \"\":\n" + validModule,
-		"null name":            "modules:\n  ~:\n" + validModule,
-		"null word name":       "modules:\n  null:\n" + validModule,
-		"newline name":         "modules:\n  \"a\\nINFO: forged\":\n" + validModule,
-		"block token":          "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n    token_value: |\n      v\n",
-		"tab user":             "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: \"u\\tx\"\n    token_name: n\n    token_value: v\n",
+		"empty":                 ``,
+		"not a map":             `- a`,
+		"no modules":            "server:\n  log_level: info\n",
+		"old format":            "a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
+		"missing token":         "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n",
+		"missing user":          "modules:\n  a:\n    endpoint: https://pbs:8007\n    token_name: n\n    token_value: v\n",
+		"missing endpoint":      "modules:\n  a:\n    user: u\n    token_name: n\n    token_value: v\n",
+		"endpoint in defaults":  "defaults:\n  endpoint: https://pbs:8007\n" + mod,
+		"two token sources":     mod + "    token_value_file: /run/secrets/a\n",
+		"defaults two tokens":   "defaults:\n  token_value: v\n  token_value_file: /f\n" + mod,
+		"unknown module key":    mod + "    verify_ssl: false\n",
+		"unknown server key":    "server:\n  port: 1\n" + mod,
+		"unknown section":       "global:\n  x: 1\n" + mod,
+		"bad log level":         "server:\n  log_level: verbose\n" + mod,
+		"bad metrics path":      "server:\n  metrics_path: metrics\n" + mod,
+		"zero scrape timeout":   "server:\n  scrape_timeout: 0s\n" + mod,
+		"neg offset":            "server:\n  scrape_timeout_offset: -1s\n" + mod,
+		"bad duration":          mod + "    timeout: soon\n",
+		"zero timeout":          mod + "    timeout: 0s\n",
+		"zero in defaults":      "defaults:\n  timeout: 0s\n" + mod,
+		"zero concurrency":      mod + "    max_concurrency: 0\n",
+		"neg task limit":        mod + "    task_limit: -1\n",
+		"day duration":          mod + "    task_lookback: 8d\n",
+		"unknown collector":     mod + "    collectors:\n      nope: true\n",
+		"disabled version":      "defaults:\n  collectors:\n    version: false\n" + mod,
+		"collectors list":       mod + "    collectors: [node]\n",
+		"bad endpoint":          "modules:\n  a:\n    endpoint: https://pbs:8007/api2\n    user: u\n    token_name: n\n    token_value: v\n",
+		"two documents":         mod + "---\nmodules:\n  b:\n" + validModule,
+		"duplicate module":      mod + "  a:\n" + validModule,
+		"empty name":            "modules:\n  \"\":\n" + validModule,
+		"null name":             "modules:\n  ~:\n" + validModule,
+		"null word name":        "modules:\n  null:\n" + validModule,
+		"newline name":          "modules:\n  \"a\\nINFO: forged\":\n" + validModule,
+		"block token":           "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n    token_value: |\n      v\n",
+		"tab user":              "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: \"u\\tx\"\n    token_name: n\n    token_value: v\n",
+		"root metrics path":     "server:\n  metrics_path: /\n" + mod,
+		"pattern metrics path":  "server:\n  metrics_path: /m/{x}\n" + mod,
+		"space metrics path":    "server:\n  metrics_path: /a b\n" + mod,
+		"trailing slash path":   "server:\n  metrics_path: /metrics/\n" + mod,
+		"bad listen address":    "server:\n  listen_address: nonsense\n" + mod,
+		"bad listen port":       "server:\n  listen_address: \":99999\"\n" + mod,
+		"collector no value":    mod + "    collectors:\n      groups:\n",
+		"collector null name":   mod + "    collectors:\n      ~: true\n",
+		"merged null module":    "base: &b\n" + validModule,
+		"null module via merge": "modules:\n  <<: {~: {endpoint: https://pbs:8007, user: u, token_name: n, token_value: v}}\n  a:\n" + validModule,
+		"invalid utf-8 host":    "modules:\n  a:\n    endpoint: http://%FF:8007\n    user: u\n    token_name: n\n    token_value: v\n",
+		"port out of range":     "modules:\n  a:\n    endpoint: https://pbs:99999\n    user: u\n    token_name: n\n    token_value: v\n",
+		"c1 control name":       "modules:\n  \"a\\u009b\":\n" + validModule,
 	} {
 		if _, err := ParseConfig([]byte(in)); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -304,5 +318,109 @@ func TestExampleConfig(t *testing.T) {
 	}
 	if len(cfg.Modules) != 2 || cfg.Modules["default"].TokenValueFile == "" || !cfg.Modules["site-b"].Collectors["access"] {
 		t.Errorf("unexpected example config: %+v", cfg.Modules)
+	}
+}
+
+// Valid values of the stricter server checks.
+func TestServerSettingsValid(t *testing.T) {
+	for _, server := range []string{
+		"server:\n  metrics_path: /pbs/metrics\n",
+		"server:\n  metrics_path: /metrics.v2_~-\n",
+		"server:\n  listen_address: 127.0.0.1:9000\n",
+		"server:\n  listen_address: \"[::1]:10019\"\n",
+		"server:\n  listen_address: \":0\"\n",
+	} {
+		if _, err := ParseConfig([]byte(server + "modules:\n  a:\n" + validModule)); err != nil {
+			t.Errorf("%q: %v", server, err)
+		}
+	}
+	// merge keys of valid modules work
+	cfg, err := ParseConfig([]byte("modules:\n  a: &a\n" + validModule + "  b:\n    <<: *a\n    endpoint: https://other:8007\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Modules["b"].Endpoint != "https://other:8007" || cfg.Modules["b"].TokenValue != "v" {
+		t.Errorf("merged module: %+v", cfg.Modules["b"])
+	}
+}
+
+// A module's token_value_file replaces a token_value of the defaults.
+func TestModuleTokenFileOverridesDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig([]byte("defaults:\n  user: u@pbs\n  token_name: n\n  token_value: default\nmodules:\n  a:\n    endpoint: https://pbs:8007\n    token_value_file: " + path + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modules, err := BuildModules(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := modules["a"].authorizationHeader; got != "PBSAPIToken=u@pbs!n:from-file" {
+		t.Errorf("Authorization = %q", got)
+	}
+}
+
+// Token files must be small regular files; a byte order mark is removed.
+func TestTokenFileLimits(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	if got, err := readTokenFile(write("bom", "\ufeffsecret\r\n")); err != nil || got != "secret" {
+		t.Errorf("byte order mark: %q, %v", got, err)
+	}
+	if _, err := readTokenFile(write("big", strings.Repeat("x", maxTokenFileSize+1))); err == nil {
+		t.Error("expected an error for a large file")
+	}
+	if _, err := readTokenFile(dir); err == nil {
+		t.Error("expected an error for a directory")
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err == nil {
+		done := make(chan error, 1)
+		go func() { _, err := readTokenFile(fifo); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Error("expected an error for a FIFO")
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("reading a FIFO blocks")
+		}
+	}
+}
+
+// A config file with token_value that others can read is reported.
+func TestSecretsExposed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	for _, tc := range []struct {
+		content string
+		mode    os.FileMode
+		want    bool
+	}{
+		{"modules:\n  a:\n" + validModule, 0o644, true},
+		{"modules:\n  a:\n" + validModule, 0o600, false},
+		{"defaults:\n  user: u\n  token_name: n\n  token_value_file: /f\nmodules:\n  a:\n    endpoint: https://pbs:8007\n", 0o644, false},
+	} {
+		if err := os.WriteFile(path, []byte(tc.content), tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, tc.mode); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := ParseConfig([]byte(tc.content))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := secretsExposed(path, cfg); err != nil || got != tc.want {
+			t.Errorf("mode %o: got %t, %v, want %t", tc.mode, got, err, tc.want)
+		}
 	}
 }

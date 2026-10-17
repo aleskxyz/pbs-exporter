@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -35,6 +37,23 @@ var removedEnv = []string{
 	"PBS_SCRAPE_TIMEOUT", "PBS_SCRAPE_TIMEOUT_OFFSET", "PBS_LOGLEVEL",
 }
 
+// secretsExposed reports whether the config file holds a token_value and can
+// be read by group or others.
+func secretsExposed(path string, cfg *Config) (bool, error) {
+	inline := cfg.Defaults.TokenValue != ""
+	for _, m := range cfg.Modules {
+		inline = inline || (m.TokenValue != "" && m.TokenValueFile == "")
+	}
+	if !inline {
+		return false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().Perm()&0o077 != 0, nil
+}
+
 // legacyEnvSet returns the removed environment variables that are set.
 func legacyEnvSet() []string {
 	var set []string
@@ -54,18 +73,31 @@ func main() {
 		os.Exit(0)
 	}
 
+	// the configuration is read on start only; a reload signal must not end
+	// the exporter
+	signal.Ignore(syscall.SIGHUP)
+
+	legacyEnv := legacyEnvSet()
 	cfg, modules, err := LoadConfig(*configFile)
 	if err != nil {
 		// before logging is set up; the message lists one problem per line
 		fmt.Fprintf(os.Stderr, "pbs-exporter: unable to load the config file %s: %s\n", sanitize(*configFile), err)
+		if len(legacyEnv) > 0 {
+			// most likely an update from a version configured by environment variables
+			fmt.Fprintf(os.Stderr, "pbs-exporter: the environment variables %s are not used anymore, see pbs-exporter.example.yml\n", strings.Join(legacyEnv, ", "))
+		}
 		os.Exit(1)
 	}
 	setupLogging(cfg.Server.LogLevel)
 
 	slog.Info("starting PBS Exporter", "version", Version, "commit", Commit, "build_time", BuildTime)
-	if env := legacyEnvSet(); len(env) > 0 {
+	if len(legacyEnv) > 0 {
 		slog.Warn("environment variables are not used anymore, the configuration is read from the config file only",
-			"variables", strings.Join(env, ","), "config_file", sanitize(*configFile))
+			"variables", strings.Join(legacyEnv, ","), "config_file", sanitize(*configFile))
+	}
+	if exposed, err := secretsExposed(*configFile, cfg); err == nil && exposed {
+		slog.Warn("the config file holds API tokens and is readable by other users, restrict it to the exporter's user (e.g. chmod 600)",
+			"config_file", sanitize(*configFile))
 	}
 
 	for _, name := range moduleNames(modules) {
@@ -77,7 +109,7 @@ func main() {
 		slog.Debug("module",
 			"name", sanitize(name), "endpoint", sanitize(mc.Endpoint), "user", sanitize(mc.User),
 			"token_name", sanitize(mc.TokenName), "token_from_file", mc.TokenValueFile != "",
-			"timeout", mod.client.Timeout, "insecure", mc.Insecure != nil && *mc.Insecure,
+			"timeout", mod.client.Timeout, "insecure", mod.insecure,
 			"max_concurrency", mod.maxConcurrency, "task_lookback", mod.taskLookback, "task_limit", mod.taskLimit,
 			"collectors", strings.Join(collectors, ","))
 	}

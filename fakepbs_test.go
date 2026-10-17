@@ -158,4 +158,4 @@ func fakePBS(t *testing.T, version string) (*fakeServer, func() []string) {
 	return f, f.Auths
 }
 
-var testTimeouts = scrapeTimeouts{fallback: 30 * time.Second, offset: 500 * time.Millisecond}
+var testTimeouts = scrapeTimeouts{fallback: defaultScrapeTimeout, offset: defaultScrapeTimeoutOffset}

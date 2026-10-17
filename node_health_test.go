@@ -72,7 +72,7 @@ func TestRoundTripWithoutConnecting(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		return dial(ctx, network, addr)
 	}
-	api := NewExporter(context.Background(), srv.URL, m, 5*time.Second).api
+	api := NewExporter(context.Background(), m, 5*time.Second).api
 	var v versionResponse
 	sent, received, err := api.getTimed(context.Background(), apiPath("version"), nil, &v)
 	if err != nil {
@@ -126,7 +126,7 @@ func TestNodeTimeOffsetUnbiased(t *testing.T) {
 	var sum float64
 	const n = 40
 	for range n {
-		s := &scrapeState{api: NewExporter(context.Background(), srv.URL, m, 5*time.Second).api, module: m}
+		s := &scrapeState{api: NewExporter(context.Background(), m, 5*time.Second).api, module: m}
 		ch := make(chan prometheus.Metric, 1)
 		if err := timeCollector.collect(context.Background(), s, ch); err != nil {
 			t.Fatal(err)

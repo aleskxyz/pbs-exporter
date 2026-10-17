@@ -5,13 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 	"golang.org/x/sync/semaphore"
@@ -100,7 +105,7 @@ type ModuleConfig struct {
 	MaxConcurrency *int `yaml:"max_concurrency"`
 	// Collectors enables (true) or disables (false) collectors; collectors
 	// that are not listed keep their default.
-	Collectors map[string]bool `yaml:"collectors"`
+	Collectors collectorSwitches `yaml:"collectors"`
 	// TaskLookback is how far back the task log is read, defaults to
 	// defaultTaskLookback.
 	TaskLookback *Duration `yaml:"task_lookback"`
@@ -125,11 +130,41 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// collectorSwitches enable (true) or disable (false) collectors. A collector
+// listed without a value, or a null name, is an error instead of silently
+// "false" or dropped.
+type collectorSwitches map[string]bool
+
+func (c *collectorSwitches) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: collectors must map collector names to true or false", n.Line)
+	}
+	if hasNullKey(n) {
+		return fmt.Errorf("line %d: collector name must not be empty or null", n.Line)
+	}
+	var values map[string]*bool
+	if err := n.Decode(&values); err != nil {
+		return err
+	}
+	switches := collectorSwitches{}
+	for name, on := range values {
+		if on == nil {
+			return fmt.Errorf("line %d: collector %q needs true or false", n.Line, name)
+		}
+		switches[name] = *on
+	}
+	*c = switches
+	return nil
+}
+
 // Module is a validated ModuleConfig with a dedicated HTTP client, so that
 // TLS and timeout settings are not shared between modules.
 type Module struct {
-	name                string
-	endpoint            string
+	name     string
+	endpoint string
+	// host is the host of the endpoint
+	host                string
+	insecure            bool
 	authorizationHeader string
 	client              *http.Client
 	maxConcurrency      int
@@ -243,8 +278,7 @@ func NewConfig(server ServerConfig, defaults ModuleConfig, modules map[string]Mo
 		merged[name] = m
 	}
 	if len(invalid) > 0 {
-		sort.Strings(invalid)
-		return nil, fmt.Errorf("invalid config file:\n%s", strings.Join(invalid, "\n"))
+		return nil, configError(invalid)
 	}
 	return &Config{Server: server, Defaults: defaults, Modules: merged}, nil
 }
@@ -254,11 +288,15 @@ func validateServer(s *ServerConfig) []string {
 	var invalid []string
 	if s.ListenAddress == "" {
 		s.ListenAddress = defaultListenAddress
+	} else if !validListenAddress(s.ListenAddress) {
+		invalid = append(invalid, "listen_address must be [host]:port, e.g. \":10019\"")
 	}
 	if s.MetricsPath == "" {
 		s.MetricsPath = defaultMetricsPath
-	} else if !strings.HasPrefix(s.MetricsPath, "/") || hasControlChar(s.MetricsPath) {
-		invalid = append(invalid, "metrics_path must be a path starting with /")
+	} else if !metricsPathPattern.MatchString(s.MetricsPath) {
+		// also no "/" (the landing page) and nothing the HTTP router would
+		// read as pattern ({...}, spaces)
+		invalid = append(invalid, "metrics_path must be a path like /metrics (letters, digits and . _ ~ - between slashes)")
 	}
 	if s.LogLevel == "" {
 		s.LogLevel = defaultLogLevel
@@ -351,15 +389,49 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-// readTokenFile reads the token secret from a file: its content without a
-// trailing line break.
+// metricsPathPattern is what metrics_path may be.
+var metricsPathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+
+// validListenAddress reports whether s is "[host]:port" with a numeric port.
+func validListenAddress(s string) bool {
+	_, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 0 && n <= 65535
+}
+
+// maxTokenFileSize is the size a token file may have; a token is far smaller.
+const maxTokenFileSize = 4096
+
+// readTokenFile reads the token secret from a regular file: its content
+// without a byte order mark and a trailing line break.
 func readTokenFile(path string) (string, error) {
+	path = filepath.Clean(path)
+	// a FIFO or device would block the start (already when opening it) or be
+	// read without end
+	if info, err := os.Stat(path); err != nil {
+		return "", err
+	} else if !info.Mode().IsRegular() {
+		return "", errors.New("not a regular file")
+	}
 	// #nosec G304 G703 -- path is set by the operator in the config file, not untrusted input
-	data, err := os.ReadFile(filepath.Clean(path))
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	value := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxTokenFileSize {
+		return "", fmt.Errorf("the file is larger than %d bytes", maxTokenFileSize)
+	}
+	// editors on Windows may write a byte order mark
+	value := strings.TrimPrefix(string(data), "\ufeff")
+	value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "\r")
 	// the errors must not contain the content, it is a secret
 	switch {
 	case value == "":
@@ -394,12 +466,34 @@ func hasNullModuleName(data []byte) bool {
 		return false
 	}
 	for i := 0; i+1 < len(top.Content); i += 2 {
-		if top.Content[i].Value != "modules" || top.Content[i+1].Kind != yaml.MappingNode {
-			continue
+		if top.Content[i].Value == "modules" && hasNullKey(top.Content[i+1]) {
+			return true
 		}
-		modules := top.Content[i+1]
-		for j := 0; j < len(modules.Content); j += 2 {
-			if k := modules.Content[j]; k.Kind == yaml.ScalarNode && k.Tag == "!!null" {
+	}
+	return false
+}
+
+// hasNullKey reports whether a mapping has a null key, also one merged in
+// with "<<".
+func hasNullKey(n *yaml.Node) bool {
+	if n.Kind == yaml.AliasNode {
+		n = n.Alias
+	}
+	switch n.Kind {
+	case yaml.SequenceNode:
+		// the value of "<<" may be a list of mappings
+		for _, c := range n.Content {
+			if hasNullKey(c) {
+				return true
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind == yaml.ScalarNode && k.Tag == "!!null" {
+				return true
+			}
+			if k.Tag == "!!merge" && hasNullKey(n.Content[i+1]) {
 				return true
 			}
 		}
@@ -407,10 +501,17 @@ func hasNullModuleName(data []byte) bool {
 	return false
 }
 
-// hasControlChar reports whether s contains an ASCII control character, e.g.
-// the trailing newline of a YAML block scalar ("token_value: |").
+// configError returns the problems of a config file as one error, sorted.
+func configError(invalid []string) error {
+	sort.Strings(invalid)
+	return fmt.Errorf("invalid config file:\n%s", strings.Join(invalid, "\n"))
+}
+
+// hasControlChar reports whether s contains a control character, e.g. the
+// trailing newline of a YAML block scalar ("token_value: |") or a C1 control
+// a terminal would interpret.
 func hasControlChar(s string) bool {
-	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // validateBaseURL checks that s is a base URL like "https://host:8007" (an
@@ -425,8 +526,10 @@ func validateBaseURL(s string) (string, error) {
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
 		return "", errors.New("must use the http or https scheme")
-	case u.Opaque != "" || u.Hostname() == "":
+	case u.Opaque != "" || u.Hostname() == "" || !utf8.ValidString(u.Hostname()):
 		return "", errors.New("must contain a host")
+	case u.Port() != "" && !validPort(u.Port()):
+		return "", errors.New("must have a port between 1 and 65535")
 	case u.User != nil:
 		return "", errors.New("must not contain user info")
 	case u.Path != "" && u.Path != "/":
@@ -456,16 +559,16 @@ func BuildModules(cfg *Config) (map[string]*Module, error) {
 		modules[name] = NewModule(name, mc)
 	}
 	if len(invalid) > 0 {
-		sort.Strings(invalid)
-		return nil, fmt.Errorf("invalid config file:\n%s", strings.Join(invalid, "\n"))
+		return nil, configError(invalid)
 	}
 	return modules, nil
 }
 
 // NewModule builds a Module from a validated module config with its token.
 func NewModule(name string, cfg ModuleConfig) *Module {
-	timeout := durationOr(cfg.Timeout, defaultModuleTimeout)
-	maxConcurrency := intOr(cfg.MaxConcurrency, defaultMaxConcurrency)
+	timeout := time.Duration(valueOr(cfg.Timeout, Duration(defaultModuleTimeout)))
+	maxConcurrency := valueOr(cfg.MaxConcurrency, defaultMaxConcurrency)
+	insecure := valueOr(cfg.Insecure, false)
 
 	// the default transport brings dial, TLS handshake and idle timeouts
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -476,7 +579,7 @@ func NewModule(name string, cfg ModuleConfig) *Module {
 	tr.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		// #nosec G402 -- opt-in per module
-		InsecureSkipVerify: cfg.Insecure != nil && *cfg.Insecure,
+		InsecureSkipVerify: insecure,
 	}
 	tr.MaxIdleConnsPerHost = maxConcurrency
 	client := &http.Client{
@@ -490,26 +593,37 @@ func NewModule(name string, cfg ModuleConfig) *Module {
 	return &Module{
 		name:                name,
 		endpoint:            cfg.Endpoint,
+		host:                hostOf(cfg.Endpoint),
+		insecure:            insecure,
 		authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
 		client:              client,
 		maxConcurrency:      maxConcurrency,
 		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
 		collectors:          enabledCollectors(cfg.Collectors),
-		taskLookback:        durationOr(cfg.TaskLookback, defaultTaskLookback),
-		taskLimit:           intOr(cfg.TaskLimit, defaultTaskLimit),
+		taskLookback:        time.Duration(valueOr(cfg.TaskLookback, Duration(defaultTaskLookback))),
+		taskLimit:           valueOr(cfg.TaskLimit, defaultTaskLimit),
 	}
 }
 
-func durationOr(v *Duration, d time.Duration) time.Duration {
-	if v != nil {
-		return time.Duration(*v)
-	}
-	return d
-}
-
-func intOr(v *int, d int) int {
+// valueOr returns *v, or d if v is not set.
+func valueOr[T any](v *T, d T) T {
 	if v != nil {
 		return *v
 	}
 	return d
+}
+
+// validPort reports whether port is a TCP port number other than 0.
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// hostOf returns the host of a validated endpoint.
+func hostOf(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

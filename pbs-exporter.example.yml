@@ -45,7 +45,7 @@ modules:
     # The secret of the API token: either token_value, or token_value_file
     # with a file that holds it (e.g. a Docker or Kubernetes secret). The file
     # is read on start; restart the exporter after rotating the token.
-    token_value_file: /run/secrets/pbs-exporter-token
+    token_value_file: /run/secrets/pbs-default-token   # see docker-compose-secrets.yaml
 
   site-b:
     endpoint: https://10.10.10.11:8007

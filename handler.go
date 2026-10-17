@@ -83,16 +83,14 @@ func newMetricsHandler(modules map[string]*Module, timeouts scrapeTimeouts) http
 			http.Error(w, "Module not found in config", http.StatusBadRequest)
 			return
 		}
-		target := module.endpoint
-
 		timeout := timeouts.scrapeTimeout(r)
-		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(target), "timeout", timeout)
+		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(module.endpoint), "timeout", timeout)
 		// the server has no WriteTimeout, as scrapes may take long; bound the
 		// write of this response instead (not supported by test recorders)
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + writeMargin))
 
 		reg := prometheus.NewRegistry()
-		if err := reg.Register(NewExporter(r.Context(), target, module, timeout)); err != nil {
+		if err := reg.Register(NewExporter(r.Context(), module, timeout)); err != nil {
 			slog.Error("registering the exporter", "err", sanitize(err.Error()))
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
