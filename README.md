@@ -15,8 +15,6 @@ Metrics are retrieved using the [Proxmox Backup Server API](https://pbs.proxmox.
 their snapshots, verify, prune, garbage collection and sync jobs, the task log, datastores, ZFS pools, node health and more.
 One exporter can monitor any number of Proxmox Backup Servers, each with its own API token.
 
-The background and design of the metrics are described in [docs/metrics-roadmap.md](docs/metrics-roadmap.md).
-
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [API token and privileges](#api-token-and-privileges)
