@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"errors"
 	"net/url"
 	"slices"
 	"strings"
@@ -89,13 +88,14 @@ type groupSummary struct {
 	times      []int64
 }
 
-// encrypted reports whether all archives of a snapshot are encrypted. The
-// manifest is only signed, and a key fingerprint is also set for backups
-// that are signed, not encrypted ("sign-only").
+// encrypted reports whether all archives of the manifest of a snapshot are
+// encrypted. The manifest itself is only signed, files that are not in the
+// manifest (the client log) have no crypt mode, and a key fingerprint is
+// also set for backups that are signed, not encrypted ("sign-only").
 func (s snapshotItem) encrypted() bool {
 	archives := 0
 	for _, f := range s.Files {
-		if f.Filename == "index.json.blob" {
+		if f.Filename == "index.json.blob" || f.CryptMode == "" {
 			continue
 		}
 		if f.CryptMode != "encrypt" {
@@ -207,6 +207,7 @@ var groupsCollector = &collector{
 		// stores with a namespace whose groups are unknown: their backup tasks
 		// could belong to a group that is not seen
 		incomplete := map[string]bool{}
+		perms, permsErr := s.getPermissions(ctx)
 		nsErr := s.forEachNamespace(ctx, func(store, ns string) error {
 			groups, err := s.getGroups(ctx, store, ns)
 			if err != nil {
@@ -222,7 +223,12 @@ var groupsCollector = &collector{
 				summaries = summarizeSnapshots(snapshots)
 			}
 			mu.Lock()
-			all = append(all, namespaceGroups{store, ns, groups, summaries})
+			all = append(all, namespaceGroups{store, ns, uniqueGroups(groups), summaries})
+			// PBS leaves out namespaces without privileges: without
+			// Datastore.Audit on the whole datastore, groups may be unseen
+			if permsErr != nil || !perms.canAuditDatastore(store) {
+				incomplete[store] = true
+			}
 			mu.Unlock()
 			return snapErr
 		})
@@ -233,20 +239,14 @@ var groupsCollector = &collector{
 		for _, nsg := range all {
 			collectGroupMetrics(nsg, lastTasks, ch)
 		}
-		return errors.Join(nsErr, taskErr)
+		return joinUnique(nsErr, taskErr, permsErr)
 	},
 }
 
 func collectGroupMetrics(nsg namespaceGroups, lastTasks map[groupRef]taskItem, ch chan<- prometheus.Metric) {
 	root := namespaceRoot(nsg.ns)
-	seen := map[groupKey]bool{}
 	for _, g := range nsg.groups {
 		key := groupKey{g.BackupType, g.BackupID}
-		// a group listed twice would make the whole scrape fail
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
 		labels := []string{nsg.store, nsg.ns, root, g.BackupType, g.BackupID}
 		gauge := func(d *prometheus.Desc, v float64, extra ...string) {
 			ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, append(labels, extra...)...)
@@ -300,12 +300,13 @@ func collectGroupMetrics(nsg namespaceGroups, lastTasks map[groupRef]taskItem, c
 		}
 		if t, ok := lastTasks[groupRef{nsg.store, nsg.ns, g.BackupType, g.BackupID}]; ok {
 			success := 0.0
-			if t.Status == "OK" {
+			if succeeded(t.Status) {
 				success = 1
 			}
 			gauge(groupLastBackupTaskSuccess, success)
 			gauge(groupLastBackupTaskEnd, float64(t.EndTime))
-			gauge(groupLastBackupDuration, float64(t.EndTime-t.StartTime))
+			// a clock step could make it negative
+			gauge(groupLastBackupDuration, float64(max(t.EndTime-t.StartTime, 0)))
 		}
 		if infoKnown {
 			gauge(groupInfo, 1, g.Owner, comment)
@@ -364,14 +365,13 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 		}
 	}
 
-	out := map[groupRef]taskItem{}
-	for _, t := range tasks {
-		if t.WorkerType != "backup" || !t.finished() {
-			continue
+	return newestPerKey(tasks, func(t taskItem) (groupRef, bool) {
+		if t.WorkerType != "backup" {
+			return groupRef{}, false
 		}
 		key, ok := parseBackupWorkerID(t.WorkerID)
 		if !ok || incomplete[key.store] {
-			continue
+			return groupRef{}, false
 		}
 		var match []groupRef
 		for _, ref := range candidates[key] {
@@ -380,11 +380,28 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 			}
 		}
 		if len(match) != 1 {
-			continue
+			return groupRef{}, false
 		}
-		if prev, ok := out[match[0]]; !ok || t.StartTime > prev.StartTime {
-			out[match[0]] = t
+		return match[0], true
+	})
+}
+
+// uniqueGroups returns groups without the groups listed more than once,
+// which would make the whole scrape fail with duplicate series.
+func uniqueGroups(groups []groupItem) []groupItem {
+	seen := map[groupKey]bool{}
+	var out []groupItem
+	for _, g := range groups {
+		if key := (groupKey{g.BackupType, g.BackupID}); !seen[key] {
+			seen[key] = true
+			out = append(out, g)
 		}
 	}
 	return out
+}
+
+// canAuditDatastore reports whether the token sees all namespaces of a
+// datastore: Datastore.Audit on it (or /datastore, or "/") that propagates.
+func (p permissions) canAuditDatastore(store string) bool {
+	return p["/datastore"]["Datastore.Audit"] || p["/datastore/"+store]["Datastore.Audit"]
 }

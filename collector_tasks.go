@@ -32,6 +32,25 @@ func (t taskItem) finished() bool {
 	return t.EndTime > 0 && t.Status != ""
 }
 
+// newestPerKey returns the newest finished task per key; key reports false
+// for tasks to leave out.
+func newestPerKey[K comparable](tasks []taskItem, key func(taskItem) (K, bool)) map[K]taskItem {
+	out := map[K]taskItem{}
+	for _, t := range tasks {
+		if !t.finished() {
+			continue
+		}
+		k, ok := key(t)
+		if !ok {
+			continue
+		}
+		if prev, seen := out[k]; !seen || t.StartTime > prev.StartTime {
+			out[k] = t
+		}
+	}
+	return out
+}
+
 // succeeded reports whether a task or job run ended without error; a run
 // with warnings ("WARNINGS: n") ended, as PBS treats it, successfully.
 func succeeded(status string) bool {

@@ -376,15 +376,61 @@ func TestSnapshotEncrypted(t *testing.T) {
 		s    snapshotItem
 		want bool
 	}{
-		"encrypted":  {snap("encrypt", "encrypt"), true},
-		"sign-only":  {snap("sign-only"), false},
-		"plain":      {snap("none"), false},
-		"mixed":      {snap("encrypt", "none"), false},
-		"only index": {snap(), false},
-		"running":    {snapshotItem{}, false},
+		"encrypted": {snap("encrypt", "encrypt"), true},
+		// the client log uploaded after the backup is not in the manifest
+		"with client log": {func() snapshotItem {
+			sn := snap("encrypt", "encrypt")
+			sn.Files = append(sn.Files, struct {
+				Filename  string `json:"filename"`
+				CryptMode string `json:"crypt-mode"`
+			}{"client.log.blob", ""})
+			return sn
+		}(), true},
+		"no crypt modes": {snap(""), false},
+		"sign-only":      {snap("sign-only"), false},
+		"plain":          {snap("none"), false},
+		"mixed":          {snap("encrypt", "none"), false},
+		"only index":     {snap(), false},
+		"running":        {snapshotItem{}, false},
 	} {
 		if got := tc.s.encrypted(); got != tc.want {
 			t.Errorf("%s: got %t, want %t", name, got, tc.want)
 		}
+	}
+}
+
+// A group listed twice keeps its backup task metrics, the duration of a task
+// can not be negative, and a run with warnings is successful.
+func TestBackupTaskMetricsEdgeCases(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/groups?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"},
+			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"}]}`},
+		"/api2/json/nodes/localhost/tasks": {body: `{"data":[
+			{"worker_type":"backup","worker_id":"store1:vm/200","user":"site-a@pbs","starttime":1700000100,"endtime":1700000000,"status":"WARNINGS: 1"}]}`},
+	})
+	got := seriesOf(t, testExporter(t, srv, ModuleConfig{}), "pbs_group_last_backup_task_success", "pbs_group_last_backup_duration_seconds")
+	want := []string{
+		`pbs_group_last_backup_duration_seconds{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 0`,
+		`pbs_group_last_backup_task_success{backup_id="200",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// Without Datastore.Audit on the whole datastore, PBS leaves out the
+// namespaces the token can not see; a backup task could belong to a group in
+// one of them, so tasks are not matched.
+func TestBackupTasksWithHiddenNamespaces(t *testing.T) {
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/access/permissions": {body: `{"data":{"/datastore":{"Datastore.Audit":false},"/remote":{"Remote.Audit":true},"/system":{"Sys.Audit":true}}}`},
+	})
+	if got := seriesOf(t, testExporter(t, srv, ModuleConfig{}), "pbs_group_last_backup_task_success"); len(got) != 0 {
+		t.Errorf("tasks matched without access to all namespaces: %v", got)
+	}
+	p := permissions{"/datastore/store1": {"Datastore.Audit": true}}
+	if !p.canAuditDatastore("store1") || p.canAuditDatastore("store2") {
+		t.Error("canAuditDatastore")
 	}
 }

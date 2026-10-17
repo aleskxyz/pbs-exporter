@@ -30,8 +30,10 @@ type snapshotItem struct {
 	// still running (or the manifest is not readable).
 	Size      *int64 `json:"size"`
 	Protected bool   `json:"protected"`
-	// Files are the archives of the snapshot with their crypt mode ("none",
-	// "encrypt", "sign-only"); not set while the backup runs.
+	// Files are the files of the snapshot. Those in the manifest have a crypt
+	// mode ("none", "encrypt", "sign-only"); others, like the client log
+	// uploaded after the backup, and all files of a snapshot without manifest
+	// (a running backup) have none.
 	Files []struct {
 		Filename  string `json:"filename"`
 		CryptMode string `json:"crypt-mode"`

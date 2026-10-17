@@ -78,15 +78,11 @@ func (s *scrapeState) withPreviousRun(ctx context.Context, run jobRun) (jobRun, 
 	if !usableTasks(err) {
 		return run, err
 	}
-	var prev *taskItem
-	for i, t := range tasks {
-		if t.WorkerType == run.workerType && t.WorkerID == run.workerID && t.finished() &&
-			(prev == nil || t.StartTime > prev.StartTime) {
-			prev = &tasks[i]
-		}
-	}
-	if prev != nil {
-		run.state, run.end, run.duration = prev.Status, prev.EndTime, prev.EndTime-prev.StartTime
+	prev, ok := newestPerKey(tasks, func(t taskItem) (struct{}, bool) {
+		return struct{}{}, t.WorkerType == run.workerType && t.WorkerID == run.workerID
+	})[struct{}{}]
+	if ok {
+		run.state, run.end, run.duration = prev.Status, prev.EndTime, max(prev.EndTime-prev.StartTime, 0)
 	}
 	return run, err
 }

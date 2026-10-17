@@ -135,23 +135,15 @@ func collectSyncJobsFromTasks(ctx context.Context, s *scrapeState, ch chan<- pro
 	if !usableTasks(err) {
 		return 0, err
 	}
-	newest := map[string]taskItem{}
-	ids := map[string]syncWorkerID{}
-	for _, t := range tasks {
-		if t.WorkerType != "syncjob" || !t.finished() {
-			continue
+	newest := newestPerKey(tasks, func(t taskItem) (string, bool) {
+		if t.WorkerType != "syncjob" {
+			return "", false
 		}
 		id, ok := parseSyncWorkerID(t.WorkerID)
-		if !ok || configured[id.jobID] || id.remote == "" || perms.canAuditRemote(id.remote) {
-			continue
-		}
-		if prev, seen := newest[id.jobID]; !seen || t.StartTime > prev.StartTime {
-			newest[id.jobID] = t
-			ids[id.jobID] = id
-		}
-	}
+		return id.jobID, ok && !configured[id.jobID] && id.remote != "" && !perms.canAuditRemote(id.remote)
+	})
 	for jobID, t := range newest {
-		id := ids[jobID]
+		id, _ := parseSyncWorkerID(t.WorkerID)
 		run := jobRun{state: t.Status, start: t.StartTime, end: t.EndTime, duration: -1}
 		collectJobRun(ch, run, "sync", jobID, id.store, id.ns, "tasks")
 		ch <- prometheus.MustNewConstMetric(syncJobInfo, prometheus.GaugeValue, 1,
