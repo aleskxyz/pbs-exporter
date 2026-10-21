@@ -409,9 +409,9 @@ pbs_datastore_size_bytes{datastore="store1"} 3000
 }
 
 // A datastore PBS reports an error for instead of its usage (failed storage,
-// offline maintenance) is not accessible; unmounted removable datastores
-// have no series, and only a failure outside maintenance is logged as
-// warning.
+// offline maintenance) is not accessible; unmounted removable datastores and
+// those the token only sees namespaces of have no series, and only a failure
+// outside maintenance is logged as warning.
 func TestDatastoreAccessible(t *testing.T) {
 	logs := captureLogs(t)
 	srv := newFakePBS(t, map[string]fakeResp{
@@ -425,10 +425,9 @@ func TestDatastoreAccessible(t *testing.T) {
 	})
 	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
 	compare(t, e, `
-# HELP pbs_datastore_accessible Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores.
+# HELP pbs_datastore_accessible Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores and when PBS reports neither (namespace-only privileges).
 # TYPE pbs_datastore_accessible gauge
 pbs_datastore_accessible{datastore="broken"} 0
-pbs_datastore_accessible{datastore="nsonly"} 1
 pbs_datastore_accessible{datastore="offline"} 0
 pbs_datastore_accessible{datastore="store1"} 1
 `, "pbs_datastore_accessible")

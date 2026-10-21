@@ -38,7 +38,7 @@ var (
 	)
 	datastoreAccessible = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "datastore", "accessible"),
-		"Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores.",
+		"Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores and when PBS reports neither (namespace-only privileges).",
 		[]string{"datastore"}, nil,
 	)
 	datastoreMaintenance = prometheus.NewDesc(
@@ -274,19 +274,20 @@ func collectDatastoreUsage(s *scrapeState, d datastoreUsage, inMaintenance bool,
 		}
 	}
 	// an unmounted removable datastore can not be opened either, that is
-	// what pbs_datastore_mounted tells
-	if d.MountStatus != "notmounted" {
-		accessible := 1.0
-		if d.Error != "" {
-			accessible = 0
-			level := slog.LevelWarn
-			if inMaintenance {
-				level = slog.LevelDebug
-			}
-			slog.Log(context.Background(), level, "PBS can not open the datastore",
-				"datastore", sanitize(d.Store), "err", sanitize(d.Error))
+	// what pbs_datastore_mounted tells; without usage and error (the token
+	// only sees namespaces), PBS did not open it, so it is unknown
+	switch {
+	case d.MountStatus == "notmounted":
+	case d.Error != "":
+		level := slog.LevelWarn
+		if inMaintenance {
+			level = slog.LevelDebug
 		}
-		gauge(datastoreAccessible, accessible)
+		slog.Log(context.Background(), level, "PBS can not open the datastore",
+			"datastore", sanitize(d.Store), "err", sanitize(d.Error))
+		gauge(datastoreAccessible, 0)
+	case d.Avail != nil || d.Total != nil || d.Used != nil:
+		gauge(datastoreAccessible, 1)
 	}
 	// no series without a value: 0 bytes would read as a full datastore
 	optGauge(available, d.Avail)
