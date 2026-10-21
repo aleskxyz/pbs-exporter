@@ -254,7 +254,7 @@ Labels used by many metrics:
 | ------------------------------------------------ | ------------------------------------------ | ----------------------------------------------------------------------- |
 | `pbs_datastore_{available,used,size}_bytes`      | `datastore`                                | Usage of the underlying storage; omitted when PBS can not read it.     |
 | `pbs_datastore_estimated_full_timestamp_seconds` | `datastore`                                | When PBS expects the datastore to be full (linear trend of the last 30 days); omitted without an estimate or when it is in the past. |
-| `pbs_datastore_accessible`                       | `datastore`                                | 1 if PBS can open the datastore, 0 if it reports an error instead of the usage (e.g. failed storage, offline maintenance); omitted for unmounted removable datastores. |
+| `pbs_datastore_accessible`                       | `datastore`                                | 1 if PBS can open the datastore, 0 if it reports an error instead of the usage (e.g. failed storage, offline maintenance); omitted for unmounted removable datastores and without `Datastore.Audit` (namespace privileges only). |
 | `pbs_datastore_mounted`                          | `datastore`                                | 1 if a removable datastore is mounted.                                  |
 | `pbs_datastore_maintenance`                      | `datastore`, `mode`                        | Present while the datastore is in maintenance, always 1.                |
 | `pbs_datastore_info`                             | `datastore`, `verify_new`, `notification_mode`, `gc_schedule`, `backend_type` | Settings, always 1. |
