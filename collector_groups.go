@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -243,11 +244,16 @@ var groupsCollector = &collector{
 
 		// the backup tasks are matched to groups over all namespaces of a store
 		tasks, taskErr := s.getTasks(ctx)
-		lastTasks := matchBackupTasks(all, tasks, incomplete)
+		var logErr error
+		lastTasks := matchBackupTasks(all, tasks, incomplete, func(ambiguous []taskItem) map[string]string {
+			namespaces, err := s.backupTaskNamespaces(ctx, ambiguous)
+			logErr = err
+			return namespaces
+		})
 		for _, nsg := range all {
 			collectGroupMetrics(nsg, lastTasks, ch)
 		}
-		return joinUnique(nsErr, taskErr, permsErr, missingDatastoreAudit(unaudited))
+		return joinUnique(nsErr, taskErr, logErr, permsErr, missingDatastoreAudit(unaudited))
 	},
 }
 
@@ -349,13 +355,21 @@ func canWrite(authID, owner string) bool {
 	return isToken && user == authID
 }
 
+// ambiguousTask is a backup task that fits groups in several namespaces.
+type ambiguousTask struct {
+	task  taskItem
+	match []groupRef
+}
+
 // matchBackupTasks returns the newest finished backup task of each group.
 // The worker ID of a backup task has no namespace, so a task belongs to the
 // group with its type and ID that the task user can write to. A task that
-// fits groups in several namespaces is left out, and so are the tasks of
-// incomplete stores. A group has no result when such an ambiguous task is
-// newer than its own newest task: the ambiguous one may be its last backup.
-func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[string]bool) map[groupRef]taskItem {
+// fits groups in several namespaces is ambiguous; for the newest ambiguous
+// task of each group, resolve is asked for the namespace (by UPID). Ambiguous
+// tasks resolve leaves out are left out, and so are the tasks of incomplete
+// stores. A group has no result when such an unresolved task is newer than
+// its own newest task: the unresolved one may be its last backup.
+func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[string]bool, resolve func([]taskItem) map[string]string) map[groupRef]taskItem {
 	candidates := map[backupTaskKey][]groupRef{}
 	owners := map[groupRef]string{}
 	for _, nsg := range all {
@@ -367,8 +381,7 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 		}
 	}
 
-	// start of the newest ambiguous task per group it may belong to
-	ambiguous := map[groupRef]int64{}
+	var ambiguous []ambiguousTask
 	newest := newestPerKey(tasks, func(t taskItem) (groupRef, bool) {
 		if t.WorkerType != "backup" {
 			return groupRef{}, false
@@ -383,20 +396,106 @@ func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[st
 				match = append(match, ref)
 			}
 		}
+		if len(match) > 1 {
+			ambiguous = append(ambiguous, ambiguousTask{t, match})
+		}
 		if len(match) != 1 {
-			for _, ref := range match {
-				ambiguous[ref] = max(ambiguous[ref], t.StartTime)
-			}
 			return groupRef{}, false
 		}
 		return match[0], true
 	})
+	if len(ambiguous) == 0 {
+		return newest
+	}
+
+	resolved := map[string]string{}
+	if resolve != nil {
+		if toResolve := newestAmbiguous(ambiguous); len(toResolve) > 0 {
+			resolved = resolve(toResolve)
+		}
+	}
+	// start of the newest unresolved task per group it may belong to
+	unresolved := map[groupRef]int64{}
+	for _, a := range ambiguous {
+		if ns, ok := resolved[a.task.UPID]; ok {
+			ref := a.match[0]
+			ref.ns = ns
+			if slices.Contains(a.match, ref) {
+				if prev, seen := newest[ref]; !seen || a.task.StartTime > prev.StartTime {
+					newest[ref] = a.task
+				}
+				continue
+			}
+		}
+		for _, ref := range a.match {
+			unresolved[ref] = max(unresolved[ref], a.task.StartTime)
+		}
+	}
 	for ref, t := range newest {
-		if start, ok := ambiguous[ref]; ok && start >= t.StartTime {
+		if start, ok := unresolved[ref]; ok && start >= t.StartTime {
 			delete(newest, ref)
 		}
 	}
 	return newest
+}
+
+// newestAmbiguous returns, once each, the newest ambiguous task of every
+// group the tasks may belong to; tasks without UPID can not be resolved.
+func newestAmbiguous(ambiguous []ambiguousTask) []taskItem {
+	perGroup := map[groupRef]taskItem{}
+	for _, a := range ambiguous {
+		if a.task.UPID == "" {
+			continue
+		}
+		for _, ref := range a.match {
+			if prev, seen := perGroup[ref]; !seen || a.task.StartTime > prev.StartTime {
+				perGroup[ref] = a.task
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var out []taskItem
+	for _, t := range perGroup {
+		if !seen[t.UPID] {
+			seen[t.UPID] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// backupTaskLogLines is how many lines of the log of a backup task are read
+// for its snapshot, which PBS logs first.
+const backupTaskLogLines = 10
+
+// backupTaskNamespaces returns the namespace of each backup task, by UPID,
+// as named in its log; tasks whose log does not name it are left out.
+func (s *scrapeState) backupTaskNamespaces(ctx context.Context, tasks []taskItem) (map[string]string, error) {
+	var mu sync.Mutex
+	out := map[string]string{}
+	err := forEach(tasks, s.module.maxConcurrency, func(t taskItem) error {
+		key, ok := parseBackupWorkerID(t.WorkerID)
+		if !ok {
+			return nil
+		}
+		q := url.Values{"start": {"0"}, "limit": {strconv.Itoa(backupTaskLogLines)}}
+		var lines []struct {
+			Text string `json:"t"`
+		}
+		if err := s.api.get(ctx, apiPath("nodes", "localhost", "tasks", t.UPID, "log"), q, &lines); err != nil {
+			return err
+		}
+		for _, l := range lines {
+			if ns, ok := parseBackupLogNamespace(l.Text, key); ok {
+				mu.Lock()
+				out[t.UPID] = ns
+				mu.Unlock()
+				return nil
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // uniqueGroups returns groups without the groups listed more than once,

@@ -408,6 +408,47 @@ pbs_datastore_size_bytes{datastore="store1"} 3000
 	compare(t, e, collectorStatus(allOK), "pbs_collector_success")
 }
 
+// A datastore PBS reports an error for instead of its usage (failed storage,
+// offline maintenance) is not accessible; unmounted removable datastores
+// have no series, and only a failure outside maintenance is logged as
+// warning.
+func TestDatastoreAccessible(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/status/datastore-usage": {body: `{"data":[
+			{"store":"store1","avail":1000,"total":3000,"used":2000,"mount-status":"nonremovable"},
+			{"store":"usb","mount-status":"notmounted"},
+			{"store":"offline","mount-status":"nonremovable","error":"datastore is in maintenance mode"},
+			{"store":"broken","mount-status":"nonremovable","error":"unable to open chunk store at \"/mnt/broken/.chunks\" - EIO"},
+			{"store":"nsonly","mount-status":"nonremovable"}]}`},
+		"/api2/json/admin/datastore": {body: `{"data":[{"store":"store1"},{"store":"usb"},{"store":"offline","maintenance":"type=offline"},{"store":"broken"},{"store":"nsonly"}]}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{Collectors: map[string]bool{"snapshots": false, "groups": false}})
+	compare(t, e, `
+# HELP pbs_datastore_accessible Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores.
+# TYPE pbs_datastore_accessible gauge
+pbs_datastore_accessible{datastore="broken"} 0
+pbs_datastore_accessible{datastore="nsonly"} 1
+pbs_datastore_accessible{datastore="offline"} 0
+pbs_datastore_accessible{datastore="store1"} 1
+`, "pbs_datastore_accessible")
+	if got := seriesOf(t, e, "pbs_collector_success"); !slices.Contains(got, `pbs_collector_success{collector="datastores"} 1`) {
+		t.Errorf("datastores collector fails: %v", got)
+	}
+	warnings := 0
+	for line := range strings.Lines(logs.String()) {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "can not open the datastore") {
+			warnings++
+			if !strings.Contains(line, "datastore=broken") {
+				t.Errorf("warning for a datastore in maintenance: %s", line)
+			}
+		}
+	}
+	if warnings == 0 {
+		t.Errorf("no warning for the failed datastore:\n%s", logs)
+	}
+}
+
 // Every response is fetched once per scrape, although several collectors
 // use it.
 func TestSharedResponsesFetchedOnce(t *testing.T) {

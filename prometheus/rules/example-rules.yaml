@@ -115,6 +115,18 @@ groups:
 
       # --- datastores ------------------------------------------------------
 
+      - alert: ProxmoxBackupDatastoreInaccessible
+        # offline maintenance also makes a datastore inaccessible
+        expr: |
+          pbs_datastore_accessible == 0
+            unless on (instance, datastore) pbs_datastore_maintenance
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Datastore {{ $labels.datastore }} is not accessible
+          description: "PBS {{ $labels.instance }} can not open the datastore {{ $labels.datastore }} (e.g. its storage failed). See the exporter log for the error."
+
       - alert: ProxmoxBackupPoolDiskOutOfSpace
         expr: "pbs_datastore_used_bytes / pbs_datastore_size_bytes * 100 > 90"
         for: 5m
