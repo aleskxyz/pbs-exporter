@@ -222,7 +222,7 @@ func TestMatchBackupTasks(t *testing.T) {
 		{"main", "site-b", "vm", "236"}: 200,
 		{"other", "", "vm", "230"}:      50,
 	}
-	got := matchBackupTasks(all, tasks, nil)
+	got := matchBackupTasks(all, tasks, nil, nil)
 	if len(got) != len(want) {
 		t.Errorf("matched %d groups, want %d: %v", len(got), len(want), got)
 	}
@@ -233,9 +233,127 @@ func TestMatchBackupTasks(t *testing.T) {
 	}
 
 	// the groups of a namespace of "main" are unknown: no matches in "main"
-	got = matchBackupTasks(all, tasks, map[string]bool{"main": true})
+	got = matchBackupTasks(all, tasks, map[string]bool{"main": true}, nil)
 	if len(got) != 1 || got[groupRef{"other", "", "vm", "230"}].StartTime != 50 {
 		t.Errorf("matched %v with an incomplete store", got)
+	}
+}
+
+// The namespace of an ambiguous task is asked for once, for the newest
+// ambiguous task of each group; a resolved task belongs to its group, and
+// older unresolved ones still hide the result of a group they may belong to.
+func TestMatchAmbiguousBackupTasks(t *testing.T) {
+	group := func(id string) groupItem {
+		return groupItem{BackupType: "vm", BackupID: id, Owner: "pve@pbs"}
+	}
+	all := []namespaceGroups{
+		{store: "main", ns: "", groups: []groupItem{group("100"), group("101"), group("102")}},
+		{store: "main", ns: "dc1", groups: []groupItem{group("100"), group("101"), group("102")}},
+	}
+	task := func(id string, start int64, status string) taskItem {
+		return taskItem{UPID: fmt.Sprintf("UPID:%s:%d", id, start), WorkerType: "backup", WorkerID: "main:vm/" + id,
+			User: "pve@pbs", StartTime: start, EndTime: start + 10, Status: status}
+	}
+	tasks := []taskItem{
+		task("100", 100, "OK"),
+		task("100", 200, "backup failed"),
+		task("101", 100, "OK"),
+		task("101", 200, "OK"), // its log names no namespace of a candidate
+		task("102", 100, "OK"),
+		task("102", 200, "OK"),
+	}
+	var asked []string
+	got := matchBackupTasks(all, tasks, nil, func(ambiguous []taskItem) map[string]string {
+		for _, t := range ambiguous {
+			asked = append(asked, t.UPID)
+		}
+		return map[string]string{
+			"UPID:100:200": "dc1",
+			"UPID:101:200": "elsewhere",
+			"UPID:102:200": "",
+		}
+	})
+	slices.Sort(asked)
+	if want := []string{"UPID:100:200", "UPID:101:200", "UPID:102:200"}; !slices.Equal(asked, want) {
+		t.Errorf("asked for %v, want %v", asked, want)
+	}
+	// the root groups of 100 and the dc1 group of 102 may have had the older
+	// unresolved task; 101 is not resolved at all
+	want := map[groupRef]taskItem{
+		{"main", "dc1", "vm", "100"}: tasks[1],
+		{"main", "", "vm", "102"}:    tasks[5],
+	}
+	if len(got) != len(want) {
+		t.Errorf("matched %d groups, want %d: %v", len(got), len(want), got)
+	}
+	for ref, task := range want {
+		if got[ref] != task {
+			t.Errorf("%v: matched %v, want %v", ref, got[ref], task)
+		}
+	}
+}
+
+func TestParseBackupLogNamespace(t *testing.T) {
+	key := backupTaskKey{"store1", "vm", "100"}
+	for line, want := range map[string]string{
+		`2026-10-18T22:15:02+02:00: starting new backup on datastore 'store1' from ::ffff:10.0.0.1: "ns/DC1/vm/100/2026-10-18T20:15:02Z"`: "DC1",
+		`starting new backup on datastore 'store1' from ::ffff:10.0.0.1: "ns/a/ns/b/vm/100/2026-10-18T20:15:02Z"`:                         "a/b",
+		`starting new backup on datastore 'store1': "vm/100/2026-10-18T20:15:02Z"`:                                                        "",
+	} {
+		if got, ok := parseBackupLogNamespace(line, key); !ok || got != want {
+			t.Errorf("%s: got %q, %t, want %q", line, got, ok, want)
+		}
+	}
+	for _, line := range []string{
+		`download 'index.json.blob' from previous backup.`,
+		`starting new backup on datastore 'store2': "vm/100/2026-10-18T20:15:02Z"`,
+		`starting new backup on datastore 'store1': "vm/101/2026-10-18T20:15:02Z"`,
+		`starting new backup on datastore 'store1': "ct/100/2026-10-18T20:15:02Z"`,
+		`starting new backup on datastore 'store1': "ns/a/vm/100"`,
+		`starting new backup on datastore 'store1': "x/a/vm/100/2026-10-18T20:15:02Z"`,
+		`starting new backup on datastore 'store1': "ns//vm/100/2026-10-18T20:15:02Z"`,
+		`starting new backup on datastore 'store1': "vm/100/2026-10-18T20:15:02Z`,
+		`starting new benchmark on datastore 'store1': "host/benchmark/2026-10-18T20:15:02Z"`,
+	} {
+		if got, ok := parseBackupLogNamespace(line, key); ok {
+			t.Errorf("%s: got %q", line, got)
+		}
+	}
+}
+
+// A backup task that fits the same group in two namespaces is matched by the
+// snapshot its log names.
+func TestAmbiguousBackupTaskFromLog(t *testing.T) {
+	const upid = `UPID:pbs:00000001:00000002:00000014:65553E00:backup:store1\x3avm\x2f100:pve@pbs!backup:`
+	srv := newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/groups?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"100","backup-count":1,"last-backup":1700086400,"owner":"pve@pbs!backup"},
+			{"backup-type":"vm","backup-id":"200","backup-count":1,"last-backup":1700000000,"owner":"site-a@pbs"}]}`},
+		apiPath("nodes", "localhost", "tasks", upid, "log"): {body: `{"data":[
+			{"n":1,"t":"2023-11-16T00:00:00+01:00: starting new backup on datastore 'store1' from ::ffff:10.0.0.1: \"ns/site-a/vm/100/2023-11-15T22:00:00Z\""},
+			{"n":2,"t":"2023-11-16T00:00:00+01:00: download 'index.json.blob' from previous backup."}],"total":2}`},
+	})
+	e := testExporter(t, srv, ModuleConfig{})
+	got := seriesOf(t, e, "pbs_group_last_backup_task_success")
+	want := []string{
+		`pbs_group_last_backup_task_success{backup_id="100",backup_type="vm",datastore="store1",namespace_root="site-a",pbs_namespace="site-a"} 1`,
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	compare(t, e, collectorStatus(allOK), "pbs_collector_success")
+
+	// without the log, the task stays ambiguous and the collector fails
+	srv = newFakePBS(t, map[string]fakeResp{
+		"/api2/json/admin/datastore/store1/groups?ns=site-a": {body: `{"data":[
+			{"backup-type":"vm","backup-id":"100","backup-count":1,"last-backup":1700086400,"owner":"pve@pbs!backup"}]}`},
+	})
+	e = testExporter(t, srv, ModuleConfig{})
+	if got := seriesOf(t, e, "pbs_group_last_backup_task_success"); len(got) != 0 {
+		t.Errorf("matched without the task log: %v", got)
+	}
+	if got := seriesOf(t, e, "pbs_collector_success"); !slices.Contains(got, `pbs_collector_success{collector="groups"} 0`) {
+		t.Errorf("groups collector does not fail: %v", got)
 	}
 }
 

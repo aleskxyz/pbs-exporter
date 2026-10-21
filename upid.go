@@ -90,6 +90,41 @@ func parseBackupWorkerID(workerID string) (backupTaskKey, bool) {
 	return backupTaskKey{store, backupType, backupID}, true
 }
 
+// backupLogStart starts the line in the log of a backup task that names the
+// snapshot, e.g. `starting new backup on datastore 'store1' from
+// ::ffff:10.0.0.1: "ns/a/ns/b/vm/100/2026-10-18T20:15:02Z"` (older PBS
+// versions leave out "from <ip>").
+const backupLogStart = "starting new backup on datastore '"
+
+// parseBackupLogNamespace returns the namespace of the snapshot that a line
+// of the log of the backup task of key names, "" for the root namespace.
+func parseBackupLogNamespace(line string, key backupTaskKey) (string, bool) {
+	_, rest, ok := strings.Cut(line, backupLogStart)
+	if !ok || !strings.HasPrefix(rest, key.store+"'") {
+		return "", false
+	}
+	i := strings.LastIndex(rest, `: "`)
+	if i < 0 {
+		return "", false
+	}
+	path, ok := strings.CutSuffix(strings.TrimSpace(rest[i+3:]), `"`)
+	if !ok {
+		return "", false
+	}
+	// the path is the namespace as "ns/<name>" per level, then
+	// "<type>/<id>/<time>"
+	parts := strings.Split(path, "/")
+	var ns []string
+	for len(parts) > 3 && parts[0] == "ns" && parts[1] != "" {
+		ns = append(ns, parts[1])
+		parts = parts[2:]
+	}
+	if len(parts) != 3 || parts[0] != key.backupType || parts[1] != key.backupID {
+		return "", false
+	}
+	return strings.Join(ns, "/"), true
+}
+
 // storeWorkerTypes have the datastore as first part of their worker ID.
 var storeWorkerTypes = map[string]bool{
 	// "sync" is a sync started by hand, its worker ID is the local datastore

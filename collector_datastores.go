@@ -36,6 +36,11 @@ var (
 		"Whether a removable datastore is mounted; omitted for other datastores.",
 		[]string{"datastore"}, nil,
 	)
+	datastoreAccessible = prometheus.NewDesc(
+		prometheus.BuildFQName(promNamespace, "datastore", "accessible"),
+		"Whether PBS can open the datastore; 0 when it reports an error instead of the usage (e.g. failed storage, offline maintenance). Omitted for unmounted removable datastores.",
+		[]string{"datastore"}, nil,
+	)
 	datastoreMaintenance = prometheus.NewDesc(
 		prometheus.BuildFQName(promNamespace, "datastore", "maintenance"),
 		"Present while the datastore is in maintenance mode, always 1.",
@@ -232,7 +237,7 @@ var datastoresCollector = &collector{
 	enabled:   true,
 	privilege: "Datastore.Audit on /datastore",
 	descs: []*prometheus.Desc{
-		available, size, used, datastoreEstimatedFull, datastoreMounted, datastoreMaintenance,
+		available, size, used, datastoreEstimatedFull, datastoreAccessible, datastoreMounted, datastoreMaintenance,
 		datastoreInfo, datastoreKeep, gcDiskBytes, gcIndexDataBytes, gcPendingBytes, gcRemovedBytes, gcBadChunks,
 	},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
@@ -240,10 +245,17 @@ var datastoresCollector = &collector{
 		if err != nil {
 			return err
 		}
+		// a datastore in maintenance is expected to fail; the error of the
+		// list is reported by collectDatastoreMaintenance
+		list, _ := s.getDatastoreList(ctx)
+		inMaintenance := map[string]bool{}
+		for _, d := range list {
+			inMaintenance[d.Store] = d.Maintenance != ""
+		}
 		backendTypes := map[string]string{}
 		for _, d := range usage {
 			backendTypes[d.Store] = d.BackendType
-			collectDatastoreUsage(s, d, ch)
+			collectDatastoreUsage(s, d, inMaintenance[d.Store], ch)
 		}
 		return errors.Join(
 			collectDatastoreMaintenance(ctx, s, ch),
@@ -252,7 +264,7 @@ var datastoresCollector = &collector{
 	},
 }
 
-func collectDatastoreUsage(s *scrapeState, d datastoreUsage, ch chan<- prometheus.Metric) {
+func collectDatastoreUsage(s *scrapeState, d datastoreUsage, inMaintenance bool, ch chan<- prometheus.Metric) {
 	gauge := func(desc *prometheus.Desc, v float64, extra ...string) {
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, v, append([]string{d.Store}, extra...)...)
 	}
@@ -261,8 +273,20 @@ func collectDatastoreUsage(s *scrapeState, d datastoreUsage, ch chan<- prometheu
 			gauge(desc, float64(*v), extra...)
 		}
 	}
-	if d.Error != "" {
-		slog.Debug("datastore without usage", "datastore", sanitize(d.Store), "err", sanitize(d.Error))
+	// an unmounted removable datastore can not be opened either, that is
+	// what pbs_datastore_mounted tells
+	if d.MountStatus != "notmounted" {
+		accessible := 1.0
+		if d.Error != "" {
+			accessible = 0
+			level := slog.LevelWarn
+			if inMaintenance {
+				level = slog.LevelDebug
+			}
+			slog.Log(context.Background(), level, "PBS can not open the datastore",
+				"datastore", sanitize(d.Store), "err", sanitize(d.Error))
+		}
+		gauge(datastoreAccessible, accessible)
 	}
 	// no series without a value: 0 bytes would read as a full datastore
 	optGauge(available, d.Avail)

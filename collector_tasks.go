@@ -35,6 +35,7 @@ func taskFailed(t taskItem) bool {
 
 // taskItem is an entry of /nodes/localhost/tasks.
 type taskItem struct {
+	UPID       string `json:"upid"`
 	WorkerType string `json:"worker_type"`
 	WorkerID   string `json:"worker_id"`
 	User       string `json:"user"`

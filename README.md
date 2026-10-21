@@ -254,6 +254,7 @@ Labels used by many metrics:
 | ------------------------------------------------ | ------------------------------------------ | ----------------------------------------------------------------------- |
 | `pbs_datastore_{available,used,size}_bytes`      | `datastore`                                | Usage of the underlying storage; omitted when PBS can not read it.     |
 | `pbs_datastore_estimated_full_timestamp_seconds` | `datastore`                                | When PBS expects the datastore to be full (linear trend of the last 30 days); omitted without an estimate or when it is in the past. |
+| `pbs_datastore_accessible`                       | `datastore`                                | 1 if PBS can open the datastore, 0 if it reports an error instead of the usage (e.g. failed storage, offline maintenance); omitted for unmounted removable datastores. |
 | `pbs_datastore_mounted`                          | `datastore`                                | 1 if a removable datastore is mounted.                                  |
 | `pbs_datastore_maintenance`                      | `datastore`, `mode`                        | Present while the datastore is in maintenance, always 1.                |
 | `pbs_datastore_info`                             | `datastore`, `verify_new`, `notification_mode`, `gc_schedule`, `backend_type` | Settings, always 1. |
@@ -285,8 +286,10 @@ manifest; PBS lists a running backup without one.
 | `pbs_group_last_backup_duration_seconds`            |                      | Duration of that task.                                                     |
 
 Backup task worker IDs carry no namespace: a task is attributed to the group its user can write to (the owner, or the user of
-an owning token), and left out when that is ambiguous. Tasks are from the task log, so they are only seen within
-`task_lookback` and the server's task log retention.
+an owning token). When groups in several namespaces fit (e.g. the same VM ID in the root and in a namespace, with the same
+owner), the newest such task of each group is attributed by the snapshot its task log names, one extra request per task;
+older ambiguous tasks are left out. Tasks are from the task log, so they are only seen within `task_lookback` and the
+server's task log retention.
 
 ### Jobs (`jobs`, `sync`)
 
