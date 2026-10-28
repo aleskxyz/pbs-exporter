@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -39,13 +41,6 @@ const defaultModuleTimeout = 5 * time.Second
 // defaultMaxConcurrency is the number of concurrent requests to one PBS of a
 // module that sets none.
 const defaultMaxConcurrency = 4
-
-// defaultTaskLookback is how far back the task log is read by default; long
-// enough to see the last run of a weekly job.
-const defaultTaskLookback = 8 * 24 * time.Hour
-
-// defaultTaskLimit is the default maximum number of tasks read from the task log.
-const defaultTaskLimit = 10000
 
 // Config is the content of the config file.
 type Config struct {
@@ -106,12 +101,6 @@ type ModuleConfig struct {
 	// Collectors enables (true) or disables (false) collectors; collectors
 	// that are not listed keep their default.
 	Collectors collectorSwitches `yaml:"collectors"`
-	// TaskLookback is how far back the task log is read, defaults to
-	// defaultTaskLookback.
-	TaskLookback *Duration `yaml:"task_lookback"`
-	// TaskLimit is the maximum number of tasks read from the task log,
-	// defaults to defaultTaskLimit.
-	TaskLimit *int `yaml:"task_limit"`
 }
 
 // Duration is a time.Duration written as Go duration ("15s", "192h").
@@ -157,22 +146,18 @@ func (c *collectorSwitches) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// Module is a validated ModuleConfig with a dedicated HTTP client, so that
+// Module is a validated ModuleConfig with a dedicated API client, so that
 // TLS and timeout settings are not shared between modules.
 type Module struct {
-	name     string
-	endpoint string
+	name string
 	// host is the host of the endpoint
-	host                string
-	insecure            bool
-	authorizationHeader string
-	client              *http.Client
-	maxConcurrency      int
-	// sem limits the concurrent requests of all scrapes of the module.
-	sem          *semaphore.Weighted
-	collectors   []*collector
-	taskLookback time.Duration
-	taskLimit    int
+	host           string
+	insecure       bool
+	maxConcurrency int
+	// api is shared by all scrapes of the module, so that its semaphore
+	// limits their concurrent requests together.
+	api        *apiClient
+	collectors []*collector
 }
 
 // LoadConfig reads the config file and builds its modules.
@@ -201,7 +186,7 @@ func LoadConfig(path string) (*Config, map[string]*Module, error) {
 // merges the modules with the defaults.
 func ParseConfig(data []byte) (*Config, error) {
 	var cfg Config
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("invalid config file: %w", err)
@@ -293,9 +278,10 @@ func validateServer(s *ServerConfig) []string {
 	}
 	if s.MetricsPath == "" {
 		s.MetricsPath = defaultMetricsPath
-	} else if !metricsPathPattern.MatchString(s.MetricsPath) {
-		// also no "/" (the landing page) and nothing the HTTP router would
-		// read as pattern ({...}, spaces)
+	} else if !metricsPathPattern.MatchString(s.MetricsPath) || path.Clean(s.MetricsPath) != s.MetricsPath || s.MetricsPath == exporterMetricsPath {
+		// also no "/" (the landing page), nothing the HTTP router would read
+		// as pattern ({...}, spaces) and no "." or ".." segment, which the
+		// router redirects elsewhere
 		invalid = append(invalid, "metrics_path must be a path like /metrics (letters, digits and . _ ~ - between slashes)")
 	}
 	if s.LogLevel == "" {
@@ -323,6 +309,12 @@ func validateModuleFields(m ModuleConfig) []string {
 	if hasControlChar(m.User) || hasControlChar(m.TokenName) || hasControlChar(m.TokenValue) {
 		invalid = append(invalid, "user, token_name and token_value must not contain control characters")
 	}
+	if m.User != "" && !userPattern.MatchString(m.User) {
+		invalid = append(invalid, "user must be <name>@<realm>, e.g. monitoring@pbs")
+	}
+	if m.TokenName != "" && !tokenNamePattern.MatchString(m.TokenName) {
+		invalid = append(invalid, "token_name is the token's name only (e.g. exporter), not <user>!<token>")
+	}
 	if m.TokenValue != "" && m.TokenValueFile != "" {
 		invalid = append(invalid, "only one of token_value and token_value_file may be set")
 	}
@@ -334,12 +326,6 @@ func validateModuleFields(m ModuleConfig) []string {
 	}
 	if m.MaxConcurrency != nil && *m.MaxConcurrency <= 0 {
 		invalid = append(invalid, "max_concurrency must be greater than 0")
-	}
-	if m.TaskLookback != nil && *m.TaskLookback <= 0 {
-		invalid = append(invalid, "task_lookback must be greater than 0")
-	}
-	if m.TaskLimit != nil && *m.TaskLimit <= 0 {
-		invalid = append(invalid, "task_limit must be greater than 0")
 	}
 	if err := validateCollectors(m.Collectors); err != nil {
 		invalid = append(invalid, "collectors: "+err.Error())
@@ -363,8 +349,6 @@ func mergeModule(defaults, m ModuleConfig) ModuleConfig {
 	m.Insecure = orDefault(m.Insecure, defaults.Insecure)
 	m.Timeout = orDefault(m.Timeout, defaults.Timeout)
 	m.MaxConcurrency = orDefault(m.MaxConcurrency, defaults.MaxConcurrency)
-	m.TaskLookback = orDefault(m.TaskLookback, defaults.TaskLookback)
-	m.TaskLimit = orDefault(m.TaskLimit, defaults.TaskLimit)
 	if len(defaults.Collectors) > 0 {
 		collectors := map[string]bool{}
 		for name, on := range defaults.Collectors {
@@ -392,14 +376,18 @@ func ptr[T any](v T) *T {
 // metricsPathPattern is what metrics_path may be.
 var metricsPathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
-// validListenAddress reports whether s is "[host]:port" with a numeric port.
+// userPattern and tokenNamePattern follow the PBS user ID (name@realm) and
+// token name; they are joined to "user!token_name" in the request header.
+var (
+	userPattern      = regexp.MustCompile(`^[^\s:/!]+@[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+	tokenNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+)
+
+// validListenAddress reports whether s is "[host]:port" with a port other
+// than 0.
 func validListenAddress(s string) bool {
 	_, port, err := net.SplitHostPort(s)
-	if err != nil {
-		return false
-	}
-	n, err := strconv.Atoi(port)
-	return err == nil && n >= 0 && n <= 65535
+	return err == nil && validPort(port)
 }
 
 // maxTokenFileSize is the size a token file may have; a token is far smaller.
@@ -591,17 +579,17 @@ func NewModule(name string, cfg ModuleConfig) *Module {
 		},
 	}
 	return &Module{
-		name:                name,
-		endpoint:            cfg.Endpoint,
-		host:                hostOf(cfg.Endpoint),
-		insecure:            insecure,
-		authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
-		client:              client,
-		maxConcurrency:      maxConcurrency,
-		sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
-		collectors:          enabledCollectors(cfg.Collectors),
-		taskLookback:        time.Duration(valueOr(cfg.TaskLookback, Duration(defaultTaskLookback))),
-		taskLimit:           valueOr(cfg.TaskLimit, defaultTaskLimit),
+		name:           name,
+		host:           hostOf(cfg.Endpoint),
+		insecure:       insecure,
+		maxConcurrency: maxConcurrency,
+		api: &apiClient{
+			endpoint:            cfg.Endpoint,
+			authorizationHeader: "PBSAPIToken=" + cfg.User + "!" + cfg.TokenName + ":" + cfg.TokenValue,
+			client:              client,
+			sem:                 semaphore.NewWeighted(int64(maxConcurrency)),
+		},
+		collectors: enabledCollectors(cfg.Collectors),
 	}
 }
 

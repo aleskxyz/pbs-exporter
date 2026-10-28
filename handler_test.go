@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // scrape is also called from goroutines, so it must not call t.Fatal.
@@ -80,12 +81,24 @@ func TestModulesUseTheirOwnCredentials(t *testing.T) {
 				t.Errorf("%s: Authorization = %q, want %q", tc.module, a, tc.want)
 			}
 		}
-		// the exporter's own metrics are exposed as well
-		for _, series := range []string{"\ngo_goroutines ", "\npromhttp_metric_handler_requests_total{"} {
-			if !strings.Contains(body, series) {
-				t.Errorf("missing %q in the output", strings.TrimSpace(series))
-			}
+		// the exporter's own metrics are not part of a module scrape
+		if strings.Contains(body, "\ngo_goroutines ") {
+			t.Errorf("%s: module scrape holds the exporter's own metrics", tc.module)
 		}
+	}
+}
+
+// The exporter's own metrics are on their own path, once per exporter.
+func TestExporterMetrics(t *testing.T) {
+	rec := httptest.NewRecorder()
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest("GET", exporterMetricsPath, nil))
+	for _, series := range []string{"\ngo_goroutines ", "\npromhttp_metric_handler_requests_total{"} {
+		if !strings.Contains(rec.Body.String(), series) {
+			t.Errorf("missing %q in the output", strings.TrimSpace(series))
+		}
+	}
+	if strings.Contains(rec.Body.String(), "pbs_up") {
+		t.Error("the exporter's own metrics hold PBS metrics")
 	}
 }
 
@@ -101,7 +114,7 @@ func TestDefaultModule(t *testing.T) {
 }
 
 func TestUnknownModule(t *testing.T) {
-	h := newMetricsHandler(testModules(t, map[string]ModuleConfig{"a": {User: "u", TokenName: "n", TokenValue: "v", Endpoint: "http://127.0.0.1:1"}}), testTimeouts)
+	h := newMetricsHandler(testModules(t, map[string]ModuleConfig{"a": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: "http://127.0.0.1:1"}}), testTimeouts)
 	code, _ := scrape(t, h, "module=nope")
 	if code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", code)
@@ -215,10 +228,10 @@ func TestGatherErrorKeepsOtherMetrics(t *testing.T) {
 	srv, _ := fakePBS(t, "1.2.3")
 	m := testModules(t, map[string]ModuleConfig{"site": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL}})["site"]
 	// a collector that emits the same series twice
-	dup := &collector{name: "dup", enabled: true, descs: []*prometheus.Desc{version},
+	dup := &collector{name: "dup", enabled: true, descs: []*prometheus.Desc{versionInfo},
 		collect: func(_ context.Context, _ *scrapeState, ch chan<- prometheus.Metric) error {
 			for range 2 {
-				ch <- prometheus.MustNewConstMetric(version, prometheus.GaugeValue, 1, "x", "y", "z")
+				ch <- prometheus.MustNewConstMetric(versionInfo, prometheus.GaugeValue, 1, "x", "y", "z")
 			}
 			return nil
 		}}
@@ -226,5 +239,23 @@ func TestGatherErrorKeepsOtherMetrics(t *testing.T) {
 	code, body := scrape(t, newMetricsHandler(map[string]*Module{"site": m}, testTimeouts), "module=site")
 	if code != http.StatusOK || !strings.Contains(body, "\npbs_up 1\n") {
 		t.Errorf("status %d, body:\n%s", code, body)
+	}
+}
+
+// The landing page is only served on "/", other unknown paths are not found.
+func TestServeMux(t *testing.T) {
+	srv, _ := fakePBS(t, "1.2.3")
+	modules := testModules(t, map[string]ModuleConfig{"default": {User: "u@pbs", TokenName: "n", TokenValue: "v", Endpoint: srv.URL}})
+	server := ServerConfig{MetricsPath: "/pbs/metrics", ScrapeTimeout: ptr(Duration(time.Second)), ScrapeTimeoutOffset: ptr(Duration(0))}
+	mux := newServeMux(server, modules)
+	for path, want := range map[string]int{
+		"/": http.StatusOK, "/pbs/metrics": http.StatusOK, exporterMetricsPath: http.StatusOK,
+		"/metrics": http.StatusNotFound, "/foo": http.StatusNotFound,
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != want {
+			t.Errorf("%s: status %d, want %d", path, rec.Code, want)
+		}
 	}
 }

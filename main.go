@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"html"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,23 +27,12 @@ var (
 	showVersion = flag.Bool("version", false, "Show version and exit")
 )
 
-// removedEnv are the environment variables of earlier versions. The
-// configuration is only read from the config file now; a set variable is
-// reported, so the change does not go unnoticed.
-var removedEnv = []string{
-	"PBS_CONFIG_FILE", "PBS_ENDPOINT", "PBS_USERNAME", "PBS_USERNAME_FILE",
-	"PBS_API_TOKEN", "PBS_API_TOKEN_FILE", "PBS_API_TOKEN_NAME", "PBS_API_TOKEN_NAME_FILE",
-	"PBS_TIMEOUT", "PBS_INSECURE", "PBS_MAX_CONCURRENCY", "PBS_COLLECTORS",
-	"PBS_TASK_LOOKBACK", "PBS_TASK_LIMIT", "PBS_METRICS_PATH", "PBS_LISTEN_ADDRESS",
-	"PBS_SCRAPE_TIMEOUT", "PBS_SCRAPE_TIMEOUT_OFFSET", "PBS_LOGLEVEL",
-}
-
 // secretsExposed reports whether the config file holds a token_value and can
 // be read by group or others.
 func secretsExposed(path string, cfg *Config) (bool, error) {
 	inline := cfg.Defaults.TokenValue != ""
 	for _, m := range cfg.Modules {
-		inline = inline || (m.TokenValue != "" && m.TokenValueFile == "")
+		inline = inline || m.TokenValue != ""
 	}
 	if !inline {
 		return false, nil
@@ -54,16 +44,9 @@ func secretsExposed(path string, cfg *Config) (bool, error) {
 	return info.Mode().Perm()&0o077 != 0, nil
 }
 
-// legacyEnvSet returns the removed environment variables that are set.
-func legacyEnvSet() []string {
-	var set []string
-	for _, name := range removedEnv {
-		if _, ok := os.LookupEnv(name); ok {
-			set = append(set, name)
-		}
-	}
-	return set
-}
+// shutdownTimeout is how long cancelled scrapes may take to send their
+// answer on a stop signal.
+const shutdownTimeout = 10 * time.Second
 
 func main() {
 	flag.Parse()
@@ -77,24 +60,15 @@ func main() {
 	// the exporter
 	signal.Ignore(syscall.SIGHUP)
 
-	legacyEnv := legacyEnvSet()
 	cfg, modules, err := LoadConfig(*configFile)
 	if err != nil {
 		// before logging is set up; the message lists one problem per line
 		fmt.Fprintf(os.Stderr, "pbs-exporter: unable to load the config file %s: %s\n", sanitize(*configFile), err)
-		if len(legacyEnv) > 0 {
-			// most likely an update from a version configured by environment variables
-			fmt.Fprintf(os.Stderr, "pbs-exporter: the environment variables %s are not used anymore, see pbs-exporter.example.yml\n", strings.Join(legacyEnv, ", "))
-		}
 		os.Exit(1)
 	}
 	setupLogging(cfg.Server.LogLevel)
 
 	slog.Info("starting PBS Exporter", "version", Version, "commit", Commit, "build_time", BuildTime)
-	if len(legacyEnv) > 0 {
-		slog.Warn("environment variables are not used anymore, the configuration is read from the config file only",
-			"variables", strings.Join(legacyEnv, ","), "config_file", sanitize(*configFile))
-	}
 	if exposed, err := secretsExposed(*configFile, cfg); err == nil && exposed {
 		slog.Warn("the config file holds API tokens and is readable by other users, restrict it to the exporter's user (e.g. chmod 600)",
 			"config_file", sanitize(*configFile))
@@ -109,8 +83,8 @@ func main() {
 		slog.Debug("module",
 			"name", sanitize(name), "endpoint", sanitize(mc.Endpoint), "user", sanitize(mc.User),
 			"token_name", sanitize(mc.TokenName), "token_from_file", mc.TokenValueFile != "",
-			"timeout", mod.client.Timeout, "insecure", mod.insecure,
-			"max_concurrency", mod.maxConcurrency, "task_lookback", mod.taskLookback, "task_limit", mod.taskLimit,
+			"timeout", mod.api.client.Timeout, "insecure", mod.insecure,
+			"max_concurrency", mod.maxConcurrency,
 			"collectors", strings.Join(collectors, ","))
 	}
 	slog.Info("modules loaded", "modules", sanitize(strings.Join(moduleNames(modules), ", ")))
@@ -120,29 +94,40 @@ func main() {
 	slog.Info("listening", "address", sanitize(server.ListenAddress), "metrics_path", sanitize(server.MetricsPath),
 		"scrape_timeout", timeouts.fallback, "scrape_timeout_offset", timeouts.offset)
 
-	http.Handle(server.MetricsPath, newMetricsHandler(modules, timeouts))
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		_, err := w.Write([]byte(`<html>
-			<head><title>PBS Exporter</title></head>
-			<body>
-			<h1>Proxmox Backup Server Exporter</h1>
-			<p><a href='` + html.EscapeString(server.MetricsPath) + `'>Metrics</a></p>
-			</body>
-			</html>`))
-		if err != nil {
-			slog.Error("failed to write response", "err", sanitize(err.Error()))
-		}
-	})
-
 	// no WriteTimeout: a scrape may take as long as Prometheus allows (see
 	// scrapeTimeouts), the scrape deadline bounds the work instead
 	httpServer := &http.Server{
-		Addr:              server.ListenAddress,
-		Handler:           nil,
+		Handler:           newServeMux(server, modules),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	fatal("server stopped", "err", sanitize(httpServer.ListenAndServe().Error()))
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ln, err := net.Listen("tcp", server.ListenAddress)
+	if err != nil {
+		fatal("listening", "err", sanitize(err.Error()))
+	}
+	if err := serve(ctx, httpServer, ln); err != nil {
+		fatal("server stopped", "err", sanitize(err.Error()))
+	}
+}
+
+// serve answers requests on ln until ctx is done. The requests' contexts are
+// derived from ctx, so running scrapes are cancelled then and answer with
+// what they collected; serve waits up to shutdownTimeout for them.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
+	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ln) }()
+	select {
+	case err := <-served:
+		return err
+	case <-ctx.Done():
+	}
+	slog.Info("shutting down, cancelling running scrapes", "timeout", shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
 }

@@ -1,1 +1,1 @@
-{"data":[{"name":"pbs-b","host":"pbs-b.example.org","port":8007,"auth-id":"sync@pbs"}]}
+{"data":[{"name":"pbs-b","host":"pbs-b.example.org","port":8007,"auth-id":"sync@pbs","fingerprint":"AA:BB:CC"}]}

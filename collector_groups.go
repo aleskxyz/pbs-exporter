@@ -1,75 +1,47 @@
 package main
 
 import (
-	"cmp"
 	"context"
-	"fmt"
-	"maps"
 	"net/url"
 	"slices"
-	"strconv"
-	"strings"
-	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // groupLabels identify a backup group. They do not depend on free text such
 // as notes, which goes on pbs_group_info.
-var groupLabels = []string{"datastore", "pbs_namespace", "namespace_root", "backup_type", "backup_id"}
+var groupLabels = []string{"datastore", "datastore_namespace", "backup_type", "backup_id"}
 
 func groupDesc(name, help string, extra ...string) *prometheus.Desc {
-	return prometheus.NewDesc(prometheus.BuildFQName(promNamespace, "group", name), help,
-		append(append([]string(nil), groupLabels...), extra...), nil)
+	return newDesc("group", name, help, append(slices.Clone(groupLabels), extra...)...)
 }
 
 var (
 	groupSnapshots = groupDesc("snapshots",
-		"Number of snapshots of the backup group.")
+		"Number of snapshots of the backup group (backup-count).")
 	groupLastBackupTimestamp = groupDesc("last_backup_timestamp_seconds",
 		"Time of the newest finished snapshot of the backup group.")
 	groupLastBackupVerifyState = groupDesc("last_backup_verify_state",
-		"Verification state (ok, failed, none) of the newest finished snapshot of the backup group, always 1.", "state")
+		"Verification state of the newest finished snapshot of the backup group as PBS reports it (ok, failed; empty when never verified), always 1.", "state")
 	groupInfo = groupDesc("info",
-		"Owner and comment (group notes, otherwise the notes of the newest snapshot) of the backup group, always 1.", "owner", "comment")
+		"Owner and comment (first line of the group notes) of the backup group, always 1.", "owner", "comment")
 	groupOldestBackupTimestamp = groupDesc("oldest_backup_timestamp_seconds",
-		"Time of the oldest snapshot of the backup group.")
+		"Time of the oldest finished snapshot of the backup group.")
 	groupProtectedSnapshots = groupDesc("protected_snapshots",
-		"Number of protected snapshots of the backup group.")
+		"Number of protected snapshots of the backup group; omitted when there are none.")
 	groupLastBackupSize = groupDesc("last_backup_size_bytes",
-		"Size of the newest snapshot of the backup group.")
+		"Size of the newest finished snapshot of the backup group.")
 	groupSnapshotsByVerifyState = groupDesc("snapshots_by_verify_state",
-		"Number of snapshots of the backup group per verification state (ok, failed, none).", "state")
+		"Number of snapshots of the backup group per verification state as PBS reports it (ok, failed; empty when never verified); omitted for states without snapshots.", "state")
 	groupLastVerifyTimestamp = groupDesc("last_verify_timestamp_seconds",
 		"Start of the newest verification of any snapshot of the backup group (synced snapshots keep the verification of their source).")
-	groupLastBackupEncrypted = groupDesc("last_backup_encrypted",
-		"Whether the archives of the newest snapshot of the backup group are encrypted (signed only does not count).")
-	groupBackupInterval = groupDesc("backup_interval_seconds",
-		"Typical time between snapshots of the backup group: the median of the gaps between its newest 4 snapshots; omitted below 3 snapshots.")
-	groupLastBackupTaskSuccess = groupDesc("last_backup_task_success",
-		"Whether the newest finished backup task of the backup group ended without error (OK or with warnings).")
-	groupLastBackupTaskEnd = groupDesc("last_backup_task_end_timestamp_seconds",
-		"End of the newest finished backup task of the backup group.")
-	groupLastBackupDuration = groupDesc("last_backup_duration_seconds",
-		"Duration of the newest finished backup task of the backup group.")
 )
-
-// intervalSnapshots is how many of the newest snapshots the backup interval is
-// measured on: retention thins out older snapshots, so older gaps are longer.
-const intervalSnapshots = 4
-
-// minIntervalSnapshots is the number of snapshots a group needs for an interval.
-const minIntervalSnapshots = 3
-
-// verifyStates are always exported by pbs_group_snapshots_by_verify_state.
-var verifyStates = []string{"ok", "failed", "none"}
 
 // groupItem is an entry of /admin/datastore/{store}/groups.
 type groupItem struct {
 	BackupType  string `json:"backup-type"`
 	BackupID    string `json:"backup-id"`
-	BackupCount int64  `json:"backup-count"`
-	LastBackup  int64  `json:"last-backup"`
+	BackupCount *int64 `json:"backup-count"`
 	Owner       string `json:"owner"`
 	Comment     string `json:"comment"`
 }
@@ -80,59 +52,14 @@ type groupKey struct {
 
 // groupSummary is what the snapshot list says about one backup group.
 type groupSummary struct {
-	// newest is the newest finished snapshot, nil if there is none; newest,
-	// oldest and times only count finished snapshots.
+	// newest is the newest finished snapshot, nil if there is none; newest
+	// and oldest only count finished snapshots.
 	newest       *snapshotItem
 	oldest       int64
 	protected    int
 	verifyStates map[string]int
 	// lastVerify is the start of the newest verification, 0 if none
 	lastVerify int64
-	times      []int64
-}
-
-// encrypted reports whether all archives of the manifest of a snapshot are
-// encrypted. The manifest itself is only signed, files that are not in the
-// manifest (the client log) have no crypt mode, and a key fingerprint is
-// also set for backups that are signed, not encrypted ("sign-only").
-func (s snapshotItem) encrypted() bool {
-	archives := 0
-	for _, f := range s.Files {
-		if f.Filename == "index.json.blob" || f.CryptMode == "" {
-			continue
-		}
-		if f.CryptMode != "encrypt" {
-			return false
-		}
-		archives++
-	}
-	return archives > 0
-}
-
-// finished reports whether a snapshot has a manifest; PBS lists running
-// backups without one, and without notes, verification and size.
-func (s snapshotItem) finished() bool {
-	return s.Size != nil
-}
-
-// interval returns the median of the gaps between the newest snapshots.
-func (g *groupSummary) interval() (int64, bool) {
-	if len(g.times) < minIntervalSnapshots {
-		return 0, false
-	}
-	times := slices.Clone(g.times)
-	slices.SortFunc(times, func(a, b int64) int { return cmp.Compare(b, a) })
-	times = times[:min(len(times), intervalSnapshots)]
-	gaps := make([]int64, 0, len(times)-1)
-	for i := 1; i < len(times); i++ {
-		gaps = append(gaps, times[i-1]-times[i])
-	}
-	slices.Sort(gaps)
-	n := len(gaps)
-	if n%2 == 1 {
-		return gaps[n/2], true
-	}
-	return (gaps[n/2-1] + gaps[n/2]) / 2, true
 }
 
 // summarizeSnapshots goes once over the snapshot list of a namespace and
@@ -153,32 +80,16 @@ func summarizeSnapshots(snapshots []snapshotItem) map[groupKey]*groupSummary {
 			if g.oldest == 0 || snap.BackupTime < g.oldest {
 				g.oldest = snap.BackupTime
 			}
-			g.times = append(g.times, snap.BackupTime)
 		}
 		if snap.Protected {
 			g.protected++
 		}
-		g.verifyStates[verifyState(snap)]++
+		g.verifyStates[snap.Verification.State]++
 		if start, ok := parseUPIDStart(snap.Verification.UPID); ok {
 			g.lastVerify = max(g.lastVerify, start)
 		}
 	}
 	return groups
-}
-
-// verifyState returns the verification state of a snapshot: "ok", "failed"
-// or "none" if it was never verified.
-func verifyState(snap snapshotItem) string {
-	if snap.Verification.State == "" {
-		return "none"
-	}
-	return snap.Verification.State
-}
-
-// namespaceRoot returns the top-level namespace of ns ("" for the root).
-func namespaceRoot(ns string) string {
-	root, _, _ := strings.Cut(ns, "/")
-	return root
 }
 
 func (s *scrapeState) getGroups(ctx context.Context, store, ns string) ([]groupItem, error) {
@@ -197,28 +108,16 @@ type namespaceGroups struct {
 var groupsCollector = &collector{
 	name:      "groups",
 	enabled:   true,
-	privilege: "Datastore.Audit on /datastore, Sys.Audit on /system/tasks for the backup tasks",
+	privilege: "Datastore.Audit on /datastore",
 	descs: []*prometheus.Desc{
 		groupSnapshots, groupLastBackupTimestamp, groupLastBackupVerifyState, groupInfo,
 		groupOldestBackupTimestamp, groupProtectedSnapshots, groupLastBackupSize, groupSnapshotsByVerifyState,
-		groupLastVerifyTimestamp, groupLastBackupEncrypted, groupBackupInterval,
-		groupLastBackupTaskSuccess, groupLastBackupTaskEnd, groupLastBackupDuration,
+		groupLastVerifyTimestamp,
 	},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
-		var mu sync.Mutex
-		var all []namespaceGroups
-		// stores with a namespace whose groups are unknown: their backup tasks
-		// could belong to a group that is not seen
-		incomplete := map[string]bool{}
-		// stores whose namespaces may be hidden for lack of privileges
-		unaudited := map[string]bool{}
-		perms, permsErr := s.getPermissions(ctx)
 		nsErr := s.forEachNamespace(ctx, func(store, ns string) error {
 			groups, err := s.getGroups(ctx, store, ns)
 			if err != nil {
-				mu.Lock()
-				incomplete[store] = true
-				mu.Unlock()
 				return err
 			}
 			// the group list stays useful without the snapshots
@@ -227,275 +126,48 @@ var groupsCollector = &collector{
 			if snapErr == nil {
 				summaries = summarizeSnapshots(snapshots)
 			}
-			mu.Lock()
-			all = append(all, namespaceGroups{store, ns, uniqueGroups(groups), summaries})
-			// PBS leaves out namespaces without privileges: without
-			// Datastore.Audit on the whole datastore, groups may be unseen
-			switch {
-			case permsErr != nil:
-				incomplete[store] = true
-			case !perms.canAuditDatastore(store):
-				incomplete[store] = true
-				unaudited[store] = true
-			}
-			mu.Unlock()
+			collectGroupMetrics(namespaceGroups{store, ns, uniqueGroups(groups), summaries}, ch)
 			return snapErr
 		})
-
-		// the backup tasks are matched to groups over all namespaces of a store
-		tasks, taskErr := s.getTasks(ctx)
-		var logErr error
-		lastTasks := matchBackupTasks(all, tasks, incomplete, func(ambiguous []taskItem) map[string]string {
-			namespaces, err := s.backupTaskNamespaces(ctx, ambiguous)
-			logErr = err
-			return namespaces
-		})
-		for _, nsg := range all {
-			collectGroupMetrics(nsg, lastTasks, ch)
-		}
-		return joinUnique(nsErr, taskErr, logErr, permsErr, missingDatastoreAudit(unaudited))
+		// PBS leaves out the datastores and namespaces the token can not audit
+		return joinUnique(nsErr, s.privilegeGap(ctx, permissions.canAuditDatastores, errDatastoresFiltered))
 	},
 }
 
-// missingDatastoreAudit returns the error for stores the token audits only
-// some namespaces of: their backup task metrics are left out.
-func missingDatastoreAudit(unaudited map[string]bool) error {
-	if len(unaudited) == 0 {
-		return nil
-	}
-	stores := slices.Sorted(maps.Keys(unaudited))
-	return fmt.Errorf("missing privilege Datastore.Audit on /datastore/%s: namespaces without privileges are hidden, the backup task metrics of the datastore are left out",
-		strings.Join(stores, ", /datastore/"))
-}
-
-func collectGroupMetrics(nsg namespaceGroups, lastTasks map[groupRef]taskItem, ch chan<- prometheus.Metric) {
-	root := namespaceRoot(nsg.ns)
+func collectGroupMetrics(nsg namespaceGroups, ch chan<- prometheus.Metric) {
 	for _, g := range nsg.groups {
 		key := groupKey{g.BackupType, g.BackupID}
-		labels := []string{nsg.store, nsg.ns, root, g.BackupType, g.BackupID}
-		gauge := func(d *prometheus.Desc, v float64, extra ...string) {
-			ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, append(labels, extra...)...)
+		labels := []string{nsg.store, nsg.ns, g.BackupType, g.BackupID}
+		send := func(d *prometheus.Desc, v float64, extra ...string) {
+			gauge(ch, d, v, append(labels, extra...)...)
 		}
 
-		gauge(groupSnapshots, float64(g.BackupCount))
-		comment := g.Comment
-		// no timestamp for a group without finished snapshot: 0 reads as 1970
-		infoKnown := true
-		if nsg.summaries == nil {
-			// without the snapshot list, the group list tells the newest
-			// finished snapshot only for groups with more than one: the only
-			// snapshot of a group may still be running
-			if g.LastBackup > 0 && g.BackupCount > 1 {
-				gauge(groupLastBackupTimestamp, float64(g.LastBackup))
-			}
-			// the notes of the newest snapshot are unknown; a series with an
-			// empty comment would replace the usual one for a scrape
-			infoKnown = comment != ""
+		if g.BackupCount != nil {
+			send(groupSnapshots, float64(*g.BackupCount))
 		}
-		if summary := nsg.summaries[key]; summary != nil {
-			if newest := summary.newest; newest != nil {
-				if comment == "" {
-					comment = newest.Comment
-				}
-				gauge(groupLastBackupTimestamp, float64(newest.BackupTime))
-				gauge(groupLastBackupVerifyState, 1, verifyState(*newest))
-				gauge(groupOldestBackupTimestamp, float64(summary.oldest))
-				gauge(groupLastBackupSize, float64(*newest.Size))
-				encrypted := 0.0
-				if newest.encrypted() {
-					encrypted = 1
-				}
-				gauge(groupLastBackupEncrypted, encrypted)
-				if interval, ok := summary.interval(); ok {
-					gauge(groupBackupInterval, float64(interval))
-				}
-			}
-			gauge(groupProtectedSnapshots, float64(summary.protected))
-			for _, state := range verifyStates {
-				gauge(groupSnapshotsByVerifyState, float64(summary.verifyStates[state]), state)
-			}
-			for state, n := range summary.verifyStates {
-				if !slices.Contains(verifyStates, state) {
-					gauge(groupSnapshotsByVerifyState, float64(n), state)
-				}
-			}
-			if summary.lastVerify > 0 {
-				gauge(groupLastVerifyTimestamp, float64(summary.lastVerify))
-			}
-		}
-		if t, ok := lastTasks[groupRef{nsg.store, nsg.ns, g.BackupType, g.BackupID}]; ok {
-			success := 0.0
-			if succeeded(t.Status) {
-				success = 1
-			}
-			gauge(groupLastBackupTaskSuccess, success)
-			gauge(groupLastBackupTaskEnd, float64(t.EndTime))
-			// a clock step could make it negative
-			gauge(groupLastBackupDuration, float64(max(t.EndTime-t.StartTime, 0)))
-		}
-		if infoKnown {
-			gauge(groupInfo, 1, g.Owner, comment)
-		}
-	}
-}
-
-// groupRef identifies a backup group across namespaces.
-type groupRef struct {
-	store, ns, backupType, backupID string
-}
-
-// canWrite reports whether a task of authID can have created a snapshot in
-// a group owned by owner: PBS only lets the owner, or the user of an owning
-// API token, add snapshots to a group (there is no exception for root@pam).
-func canWrite(authID, owner string) bool {
-	if authID == owner {
-		return true
-	}
-	user, _, isToken := strings.Cut(owner, "!")
-	return isToken && user == authID
-}
-
-// ambiguousTask is a backup task that fits groups in several namespaces.
-type ambiguousTask struct {
-	task  taskItem
-	match []groupRef
-}
-
-// matchBackupTasks returns the newest finished backup task of each group.
-// The worker ID of a backup task has no namespace, so a task belongs to the
-// group with its type and ID that the task user can write to. A task that
-// fits groups in several namespaces is ambiguous; for the newest ambiguous
-// task of each group, resolve is asked for the namespace (by UPID). Ambiguous
-// tasks resolve leaves out are left out, and so are the tasks of incomplete
-// stores. A group has no result when such an unresolved task is newer than
-// its own newest task: the unresolved one may be its last backup.
-func matchBackupTasks(all []namespaceGroups, tasks []taskItem, incomplete map[string]bool, resolve func([]taskItem) map[string]string) map[groupRef]taskItem {
-	candidates := map[backupTaskKey][]groupRef{}
-	owners := map[groupRef]string{}
-	for _, nsg := range all {
-		for _, g := range nsg.groups {
-			key := backupTaskKey{nsg.store, g.BackupType, g.BackupID}
-			ref := groupRef{nsg.store, nsg.ns, g.BackupType, g.BackupID}
-			candidates[key] = append(candidates[key], ref)
-			owners[ref] = g.Owner
-		}
-	}
-
-	var ambiguous []ambiguousTask
-	newest := newestPerKey(tasks, func(t taskItem) (groupRef, bool) {
-		if t.WorkerType != "backup" {
-			return groupRef{}, false
-		}
-		key, ok := parseBackupWorkerID(t.WorkerID)
-		if !ok || incomplete[key.store] {
-			return groupRef{}, false
-		}
-		var match []groupRef
-		for _, ref := range candidates[key] {
-			if canWrite(t.User, owners[ref]) {
-				match = append(match, ref)
-			}
-		}
-		if len(match) > 1 {
-			ambiguous = append(ambiguous, ambiguousTask{t, match})
-		}
-		if len(match) != 1 {
-			return groupRef{}, false
-		}
-		return match[0], true
-	})
-	if len(ambiguous) == 0 {
-		return newest
-	}
-
-	resolved := map[string]string{}
-	if resolve != nil {
-		if toResolve := newestAmbiguous(ambiguous); len(toResolve) > 0 {
-			resolved = resolve(toResolve)
-		}
-	}
-	// start of the newest unresolved task per group it may belong to
-	unresolved := map[groupRef]int64{}
-	for _, a := range ambiguous {
-		if ns, ok := resolved[a.task.UPID]; ok {
-			ref := a.match[0]
-			ref.ns = ns
-			if slices.Contains(a.match, ref) {
-				if prev, seen := newest[ref]; !seen || a.task.StartTime > prev.StartTime {
-					newest[ref] = a.task
-				}
-				continue
-			}
-		}
-		for _, ref := range a.match {
-			unresolved[ref] = max(unresolved[ref], a.task.StartTime)
-		}
-	}
-	for ref, t := range newest {
-		if start, ok := unresolved[ref]; ok && start >= t.StartTime {
-			delete(newest, ref)
-		}
-	}
-	return newest
-}
-
-// newestAmbiguous returns, once each, the newest ambiguous task of every
-// group the tasks may belong to; tasks without UPID can not be resolved.
-func newestAmbiguous(ambiguous []ambiguousTask) []taskItem {
-	perGroup := map[groupRef]taskItem{}
-	for _, a := range ambiguous {
-		if a.task.UPID == "" {
+		send(groupInfo, 1, g.Owner, g.Comment)
+		// without the snapshot list (nil summaries), only the group list is
+		// exported
+		summary := nsg.summaries[key]
+		if summary == nil {
 			continue
 		}
-		for _, ref := range a.match {
-			if prev, seen := perGroup[ref]; !seen || a.task.StartTime > prev.StartTime {
-				perGroup[ref] = a.task
-			}
+		if newest := summary.newest; newest != nil {
+			send(groupLastBackupTimestamp, float64(newest.BackupTime))
+			send(groupLastBackupVerifyState, 1, newest.Verification.State)
+			send(groupOldestBackupTimestamp, float64(summary.oldest))
+			send(groupLastBackupSize, float64(*newest.Size))
+		}
+		if summary.protected > 0 {
+			send(groupProtectedSnapshots, float64(summary.protected))
+		}
+		for state, n := range summary.verifyStates {
+			send(groupSnapshotsByVerifyState, float64(n), state)
+		}
+		if summary.lastVerify > 0 {
+			send(groupLastVerifyTimestamp, float64(summary.lastVerify))
 		}
 	}
-	seen := map[string]bool{}
-	var out []taskItem
-	for _, t := range perGroup {
-		if !seen[t.UPID] {
-			seen[t.UPID] = true
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// backupTaskLogLines is how many lines of the log of a backup task are read
-// for its snapshot, which PBS logs first.
-const backupTaskLogLines = 10
-
-// backupTaskNamespaces returns the namespace of each backup task, by UPID,
-// as named in its log; tasks whose log does not name it are left out.
-func (s *scrapeState) backupTaskNamespaces(ctx context.Context, tasks []taskItem) (map[string]string, error) {
-	var mu sync.Mutex
-	out := map[string]string{}
-	err := forEach(tasks, s.module.maxConcurrency, func(t taskItem) error {
-		key, ok := parseBackupWorkerID(t.WorkerID)
-		if !ok {
-			return nil
-		}
-		q := url.Values{"start": {"0"}, "limit": {strconv.Itoa(backupTaskLogLines)}}
-		var lines []struct {
-			Text string `json:"t"`
-		}
-		if err := s.api.get(ctx, apiPath("nodes", "localhost", "tasks", t.UPID, "log"), q, &lines); err != nil {
-			return err
-		}
-		for _, l := range lines {
-			if ns, ok := parseBackupLogNamespace(l.Text, key); ok {
-				mu.Lock()
-				out[t.UPID] = ns
-				mu.Unlock()
-				return nil
-			}
-		}
-		return nil
-	})
-	return out, err
 }
 
 // uniqueGroups returns groups without the groups listed more than once,
@@ -510,10 +182,4 @@ func uniqueGroups(groups []groupItem) []groupItem {
 		}
 	}
 	return out
-}
-
-// canAuditDatastore reports whether the token sees all namespaces of a
-// datastore: Datastore.Audit on it (or /datastore, or "/") that propagates.
-func (p permissions) canAuditDatastore(store string) bool {
-	return p["/datastore"]["Datastore.Audit"] || p["/datastore/"+store]["Datastore.Audit"]
 }

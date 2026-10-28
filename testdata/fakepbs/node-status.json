@@ -7,6 +7,7 @@
     "memory": {"free": 100, "total": 300, "used": 200},
     "swap": {"free": 10, "total": 30, "used": 20},
     "root": {"avail": 1, "total": 3, "used": 2},
-    "current-kernel": {"machine": "x86_64", "release": "6.8.12-4-pve", "sysname": "Linux"}
+    "current-kernel": {"machine": "x86_64", "release": "6.8.12-4-pve", "sysname": "Linux"},
+    "info": {"fingerprint": "0A:1B:2C:3D"}
   }
 }
