@@ -78,7 +78,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_uptime_seconds{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_uptime_seconds{job=\"pbs-exporter\", instance=\"$instance\"}",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -272,7 +272,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_group_last_backup_timestamp_seconds{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\"} * 1000 * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
+          "expr": "pbs_group_last_backup_timestamp_seconds{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\"} * 1000 * on (instance, datastore, datastore_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
           "format": "table",
           "instant": false,
           "range": true,
@@ -284,7 +284,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "sum without (state) (pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"ok\"} or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"none\"} * 0 or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\", state=\"failed\"} * -1) * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
+          "expr": "sum without (state) (pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\", state=\"ok\"} or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\", state=\"\"} * 0 or pbs_group_last_backup_verify_state{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\", state=\"failed\"} * -1) * on (instance, datastore, datastore_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
           "format": "table",
           "hide": false,
           "instant": false,
@@ -314,7 +314,7 @@
                 "aggregations": [],
                 "operation": "groupby"
               },
-              "pbs_namespace": {
+              "datastore_namespace": {
                 "aggregations": [],
                 "operation": "groupby"
               },
@@ -346,7 +346,7 @@
               "backup_id": 1,
               "comment": 2,
               "datastore": 3,
-              "pbs_namespace": 4,
+              "datastore_namespace": 4,
               "Value #A (lastNotNull)": 5,
               "Value #B (lastNotNull)": 6
             },
@@ -354,7 +354,7 @@
               "Value #A (lastNotNull)": "Last snapshot",
               "Value #B (lastNotNull)": "Verify state",
               "datastore": "Datastore",
-              "pbs_namespace": "Namespace",
+              "datastore_namespace": "Namespace",
               "backup_id": "ID",
               "comment": "Name",
               "backup_type": "Type"
@@ -431,7 +431,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "sum(pbs_snapshot_count{job=\"pbs-exporter\", instance=\"$instance\"})",
+          "expr": "sum(pbs_group_snapshots{job=\"pbs-exporter\", instance=\"$instance\"})",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -510,7 +510,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_snapshot_count{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\"}",
+          "expr": "sum by (instance, datastore, datastore_namespace) (pbs_group_snapshots{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\"})",
           "format": "table",
           "instant": false,
           "range": true,
@@ -535,7 +535,7 @@
                 ],
                 "operation": "groupby"
               },
-              "pbs_namespace": {
+              "datastore_namespace": {
                 "aggregations": [],
                 "operation": "groupby"
               }
@@ -549,12 +549,12 @@
             "indexByName": {
               "Value (lastNotNull)": 2,
               "datastore": 1,
-              "pbs_namespace": 0
+              "datastore_namespace": 0
             },
             "renameByName": {
               "Value (lastNotNull)": "Snapshot count",
               "datastore": "Datastore",
-              "pbs_namespace": "Namespace"
+              "datastore_namespace": "Namespace"
             }
           }
         },
@@ -633,7 +633,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_group_snapshots{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", pbs_namespace=~\"$namespace\"} * on (instance, datastore, pbs_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
+          "expr": "pbs_group_snapshots{job=\"pbs-exporter\", instance=\"$instance\", datastore=~\"$datastore\", datastore_namespace=~\"$namespace\"} * on (instance, datastore, datastore_namespace, backup_type, backup_id) group_left (comment) pbs_group_info{job=\"pbs-exporter\", instance=\"$instance\", comment=~\"$vmname\"}",
           "format": "table",
           "instant": false,
           "range": true,
@@ -688,7 +688,7 @@
               "backup_id": "ID",
               "comment": "Name",
               "backup_type": "Type",
-              "pbs_namespace": "Namespace"
+              "datastore_namespace": "Namespace"
             }
           }
         },
@@ -1052,7 +1052,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_cpu_usage_ratio{job=\"pbs-exporter\",instance=\"$instance\"}",
+          "expr": "pbs_node_cpu_usage_ratio{job=\"pbs-exporter\",instance=\"$instance\"}",
           "instant": false,
           "legendFormat": "usage",
           "range": true,
@@ -1148,7 +1148,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_load1{job=\"pbs-exporter\",instance=\"$instance\"}",
+          "expr": "pbs_node_load1{job=\"pbs-exporter\",instance=\"$instance\"}",
           "instant": false,
           "legendFormat": "1m load average",
           "range": true,
@@ -1160,7 +1160,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_load5{job=\"pbs-exporter\",instance=\"$instance\"}",
+          "expr": "pbs_node_load5{job=\"pbs-exporter\",instance=\"$instance\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "5m load average",
@@ -1173,7 +1173,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_load15{job=\"pbs-exporter\",instance=\"$instance\"}",
+          "expr": "pbs_node_load15{job=\"pbs-exporter\",instance=\"$instance\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "15m load average",
@@ -1284,7 +1284,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_memory_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_memory_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "instant": false,
           "legendFormat": "memory used",
           "range": true,
@@ -1296,7 +1296,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_memory_free_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_memory_free_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "memory free",
@@ -1370,7 +1370,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_memory_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_host_memory_total_bytes{job=\"pbs-exporter\", instance=\"$instance\"} * 100",
+          "expr": "pbs_node_memory_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_node_memory_size_bytes{job=\"pbs-exporter\", instance=\"$instance\"} * 100",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -1466,7 +1466,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_swap_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_swap_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "instant": false,
           "legendFormat": "swap used",
           "range": true,
@@ -1478,7 +1478,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_swap_free_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_swap_free_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "hide": false,
           "instant": false,
           "legendFormat": "swap free",
@@ -1552,7 +1552,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_swap_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_host_swap_total_bytes{job=\"pbs-exporter\", instance=\"$instance\"} * 100",
+          "expr": "pbs_node_swap_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_node_swap_size_bytes{job=\"pbs-exporter\", instance=\"$instance\"} * 100",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -1661,7 +1661,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_io_wait_ratio{instance=\"$instance\"}",
+          "expr": "pbs_node_io_wait_ratio{job=\"pbs-exporter\",instance=\"$instance\"}",
           "instant": false,
           "legendFormat": "io delay",
           "range": true,
@@ -1754,7 +1754,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_disk_total_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_rootfs_size_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "format": "time_series",
           "instant": false,
           "legendFormat": "total",
@@ -1767,7 +1767,7 @@
             "uid": "prometheus"
           },
           "editorMode": "builder",
-          "expr": "pbs_host_disk_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
+          "expr": "pbs_node_rootfs_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"}",
           "format": "time_series",
           "hide": false,
           "instant": false,
@@ -1842,7 +1842,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "pbs_host_disk_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_host_disk_total_bytes{job=\"pbs-exporter\",instance=\"$instance\"} * 100",
+          "expr": "pbs_node_rootfs_used_bytes{job=\"pbs-exporter\", instance=\"$instance\"} / pbs_node_rootfs_size_bytes{job=\"pbs-exporter\",instance=\"$instance\"} * 100",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -1881,7 +1881,7 @@
         "type": "query"
       },
       {
-        "allValue": ".+",
+        "allValue": ".*",
         "current": {
           "selected": true,
           "text": [
@@ -1895,15 +1895,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(pbs_datastore_size_bytes,datastore)",
+        "definition": "label_values(pbs_datastore_info{instance=\"$instance\"},datastore)",
         "hide": 0,
         "includeAll": true,
-        "label": "Datasource",
+        "label": "Datastore",
         "multi": true,
         "name": "datastore",
         "options": [],
         "query": {
-          "query": "label_values(pbs_datastore_size_bytes,datastore)",
+          "query": "label_values(pbs_datastore_info{instance=\"$instance\"},datastore)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -1913,7 +1913,7 @@
         "type": "query"
       },
       {
-        "allValue": ".+",
+        "allValue": ".*",
         "current": {
           "selected": true,
           "text": [
@@ -1927,7 +1927,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(pbs_snapshot_count{datastore=~\"$datastore\"},pbs_namespace)",
+        "definition": "label_values(pbs_group_snapshots{instance=\"$instance\",datastore=~\"$datastore\"},datastore_namespace)",
         "hide": 0,
         "includeAll": true,
         "label": "Namespace",
@@ -1935,7 +1935,7 @@
         "name": "namespace",
         "options": [],
         "query": {
-          "query": "label_values(pbs_snapshot_count{datastore=~\"$datastore\"},pbs_namespace)",
+          "query": "label_values(pbs_group_snapshots{instance=\"$instance\",datastore=~\"$datastore\"},datastore_namespace)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
@@ -1945,7 +1945,7 @@
         "type": "query"
       },
       {
-        "allValue": ".+",
+        "allValue": ".*",
         "current": {
           "selected": true,
           "text": [
@@ -1959,7 +1959,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(pbs_group_info{pbs_namespace=~\"$namespace\",datastore=~\"$datastore\"},comment)",
+        "definition": "label_values(pbs_group_info{instance=\"$instance\",datastore_namespace=~\"$namespace\",datastore=~\"$datastore\"},comment)",
         "hide": 0,
         "includeAll": true,
         "label": "Name",
@@ -1967,7 +1967,7 @@
         "name": "vmname",
         "options": [],
         "query": {
-          "query": "label_values(pbs_group_info{pbs_namespace=~\"$namespace\",datastore=~\"$datastore\"},comment)",
+          "query": "label_values(pbs_group_info{instance=\"$instance\",datastore_namespace=~\"$namespace\",datastore=~\"$datastore\"},comment)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,

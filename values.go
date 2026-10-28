@@ -1,6 +1,9 @@
 package main
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // optInt and optBool format an optional setting as label value, "" when it
 // is not set.
@@ -16,6 +19,12 @@ func optBool(v *bool) string {
 		return ""
 	}
 	return strconv.FormatBool(*v)
+}
+
+// normalizeFingerprint returns a certificate fingerprint in lower case, so
+// that it compares equal however it was entered ("AA:BB" or "aa:bb").
+func normalizeFingerprint(fp string) string {
+	return strings.ToLower(strings.TrimSpace(fp))
 }
 
 // keepOptions are the retention settings of prune jobs and datastores.

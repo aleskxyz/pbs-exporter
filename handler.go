@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"log/slog"
 	"math"
 	"net/http"
@@ -66,6 +67,11 @@ func (gatherErrorLog) Println(v ...any) {
 	slog.Error("gathering metrics", "err", sanitize(fmt.Sprint(v...)))
 }
 
+// exporterMetricsPath serves the exporter's own metrics (go_*, process_*,
+// and promhttp_* for the requests of this path), once per exporter instead
+// of in every module scrape.
+const exporterMetricsPath = "/exporter-metrics"
+
 // newMetricsHandler returns the /metrics handler. Each request selects a
 // module with the "module" URL parameter (default "default") and scrapes the
 // module's endpoint; other parameters, like "target", are ignored.
@@ -73,7 +79,7 @@ func (gatherErrorLog) Println(v ...any) {
 // Every request gets its own registry, so concurrent scrapes of different
 // modules can not see each other's metrics.
 func newMetricsHandler(modules map[string]*Module, timeouts scrapeTimeouts) http.Handler {
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		moduleName := r.URL.Query().Get("module")
 		if moduleName == "" {
 			moduleName = defaultModuleName
@@ -84,7 +90,7 @@ func newMetricsHandler(modules map[string]*Module, timeouts scrapeTimeouts) http
 			return
 		}
 		timeout := timeouts.scrapeTimeout(r)
-		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(module.endpoint), "timeout", timeout)
+		slog.Debug("scrape", "module", sanitize(moduleName), "endpoint", sanitize(module.api.endpoint), "timeout", timeout)
 		// the server has no WriteTimeout, as scrapes may take long; bound the
 		// write of this response instead (not supported by test recorders)
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + writeMargin))
@@ -96,15 +102,40 @@ func newMetricsHandler(modules map[string]*Module, timeouts scrapeTimeouts) http
 			return
 		}
 
-		// also expose the exporter's own go_* / process_* metrics
-		gatherers := prometheus.Gatherers{prometheus.DefaultGatherer, reg}
 		// a metric that can not be gathered (e.g. a duplicate series) must not
-		// cost the whole scrape, pbs_up and the collector status included
-		promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{
+		// cost the whole scrape, pbs_up and the collector status included;
+		// the exporter's own metrics are on exporterMetricsPath, so that each
+		// module scrape holds only the metrics of its server
+		promhttp.HandlerFor(reg, promhttp.HandlerOpts{
 			ErrorHandling: promhttp.ContinueOnError,
 			ErrorLog:      gatherErrorLog{},
 		}).ServeHTTP(w, r)
 	})
-	// same instrumentation as promhttp.Handler(): promhttp_metric_handler_requests_*
-	return promhttp.InstrumentMetricHandler(prometheus.DefaultRegisterer, h)
+}
+
+// newServeMux returns the routes of the exporter: the module scrapes on the
+// metrics path, the exporter's own metrics and a landing page on "/".
+func newServeMux(server ServerConfig, modules map[string]*Module) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle(server.MetricsPath, newMetricsHandler(modules, server.timeouts()))
+	mux.Handle(exporterMetricsPath, promhttp.Handler())
+	landingPage := []byte(`<html>
+<head><title>PBS Exporter</title></head>
+<body>
+<h1>Proxmox Backup Server Exporter</h1>
+<p><a href='` + html.EscapeString(server.MetricsPath) + `'>Metrics</a></p>
+</body>
+</html>
+`)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// "/" matches every path the other routes do not
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := w.Write(landingPage); err != nil {
+			slog.Error("failed to write response", "err", sanitize(err.Error()))
+		}
+	})
+	return mux
 }

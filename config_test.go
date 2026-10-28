@@ -40,8 +40,7 @@ modules:
     user: other@pbs
     token_value: secret
     insecure: false
-    task_lookback: 48h
-    task_limit: 500
+    max_concurrency: 3
     collectors:
       apt: true
       disks: true
@@ -57,7 +56,7 @@ modules:
 	dc1 := cfg.Modules["dc1"]
 	if dc1.Endpoint != "https://10.0.0.1:8007" || dc1.User != "monitoring@pbs" || dc1.TokenName != "exporter" ||
 		dc1.TokenValueFile != "/run/secrets/pbs" || dc1.TokenValue != "" || !*dc1.Insecure ||
-		time.Duration(*dc1.Timeout) != 15*time.Second || *dc1.MaxConcurrency != 2 || dc1.TaskLookback != nil {
+		time.Duration(*dc1.Timeout) != 15*time.Second || *dc1.MaxConcurrency != 2 {
 		t.Errorf("dc1 = %+v", dc1)
 	}
 	if !dc1.Collectors["access"] || dc1.Collectors["apt"] || len(dc1.Collectors) != 2 {
@@ -67,7 +66,7 @@ modules:
 	// settings of the module win; the token is replaced as a whole
 	fra3 := cfg.Modules["fra3"]
 	if fra3.User != "other@pbs" || fra3.TokenName != "exporter" || fra3.TokenValue != "secret" || fra3.TokenValueFile != "" ||
-		*fra3.Insecure || time.Duration(*fra3.TaskLookback) != 48*time.Hour || *fra3.TaskLimit != 500 {
+		*fra3.Insecure || *fra3.MaxConcurrency != 3 {
 		t.Errorf("fra3 = %+v", fra3)
 	}
 	if !fra3.Collectors["access"] || !fra3.Collectors["apt"] || !fra3.Collectors["disks"] {
@@ -90,18 +89,16 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := modules["site"]
-	if m.authorizationHeader != "PBSAPIToken=u@pbs!n:v" || m.endpoint != "https://pbs:8007" {
+	if m.api.authorizationHeader != "PBSAPIToken=u@pbs!n:v" || m.api.endpoint != "https://pbs:8007" {
 		t.Errorf("unexpected module: %+v", m)
 	}
-	if m.client.Timeout != defaultModuleTimeout || m.maxConcurrency != defaultMaxConcurrency ||
-		m.taskLookback != defaultTaskLookback || m.taskLimit != defaultTaskLimit {
-		t.Errorf("module defaults: timeout %s, max_concurrency %d, task_lookback %s, task_limit %d",
-			m.client.Timeout, m.maxConcurrency, m.taskLookback, m.taskLimit)
+	if m.api.client.Timeout != defaultModuleTimeout || m.maxConcurrency != defaultMaxConcurrency {
+		t.Errorf("module defaults: timeout %s, max_concurrency %d", m.api.client.Timeout, m.maxConcurrency)
 	}
-	if m.client.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
+	if m.api.client.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
 		t.Error("TLS must be verified unless insecure is set")
 	}
-	if m.client.CheckRedirect == nil {
+	if m.api.client.CheckRedirect == nil {
 		t.Error("redirects must not be followed")
 	}
 	var names []string
@@ -119,10 +116,10 @@ func TestParseConfigErrors(t *testing.T) {
 		"empty":                 ``,
 		"not a map":             `- a`,
 		"no modules":            "server:\n  log_level: info\n",
-		"old format":            "a:\n  user: u\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
-		"missing token":         "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n",
+		"old format":            "a:\n  user: u@pbs\n  token_name: n\n  token_value: v\n  endpoint: https://pbs:8007\n",
+		"missing token":         "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u@pbs\n    token_name: n\n",
 		"missing user":          "modules:\n  a:\n    endpoint: https://pbs:8007\n    token_name: n\n    token_value: v\n",
-		"missing endpoint":      "modules:\n  a:\n    user: u\n    token_name: n\n    token_value: v\n",
+		"missing endpoint":      "modules:\n  a:\n    user: u@pbs\n    token_name: n\n    token_value: v\n",
 		"endpoint in defaults":  "defaults:\n  endpoint: https://pbs:8007\n" + mod,
 		"two token sources":     mod + "    token_value_file: /run/secrets/a\n",
 		"defaults two tokens":   "defaults:\n  token_value: v\n  token_value_file: /f\n" + mod,
@@ -137,33 +134,41 @@ func TestParseConfigErrors(t *testing.T) {
 		"zero timeout":          mod + "    timeout: 0s\n",
 		"zero in defaults":      "defaults:\n  timeout: 0s\n" + mod,
 		"zero concurrency":      mod + "    max_concurrency: 0\n",
-		"neg task limit":        mod + "    task_limit: -1\n",
-		"day duration":          mod + "    task_lookback: 8d\n",
+		"removed task_lookback": mod + "    task_lookback: 48h\n",
+		"day duration":          mod + "    timeout: 8d\n",
 		"unknown collector":     mod + "    collectors:\n      nope: true\n",
 		"disabled version":      "defaults:\n  collectors:\n    version: false\n" + mod,
 		"collectors list":       mod + "    collectors: [node]\n",
-		"bad endpoint":          "modules:\n  a:\n    endpoint: https://pbs:8007/api2\n    user: u\n    token_name: n\n    token_value: v\n",
+		"bad endpoint":          "modules:\n  a:\n    endpoint: https://pbs:8007/api2\n    user: u@pbs\n    token_name: n\n    token_value: v\n",
 		"two documents":         mod + "---\nmodules:\n  b:\n" + validModule,
 		"duplicate module":      mod + "  a:\n" + validModule,
 		"empty name":            "modules:\n  \"\":\n" + validModule,
 		"null name":             "modules:\n  ~:\n" + validModule,
 		"null word name":        "modules:\n  null:\n" + validModule,
 		"newline name":          "modules:\n  \"a\\nINFO: forged\":\n" + validModule,
-		"block token":           "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u\n    token_name: n\n    token_value: |\n      v\n",
+		"block token":           "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u@pbs\n    token_name: n\n    token_value: |\n      v\n",
 		"tab user":              "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: \"u\\tx\"\n    token_name: n\n    token_value: v\n",
 		"root metrics path":     "server:\n  metrics_path: /\n" + mod,
 		"pattern metrics path":  "server:\n  metrics_path: /m/{x}\n" + mod,
 		"space metrics path":    "server:\n  metrics_path: /a b\n" + mod,
 		"trailing slash path":   "server:\n  metrics_path: /metrics/\n" + mod,
+		"exporter metrics path": "server:\n  metrics_path: /exporter-metrics\n" + mod,
 		"bad listen address":    "server:\n  listen_address: nonsense\n" + mod,
 		"bad listen port":       "server:\n  listen_address: \":99999\"\n" + mod,
+		"dot dot metrics path":  "server:\n  metrics_path: /a/..\n" + mod,
+		"dot metrics path":      "server:\n  metrics_path: /a/./b\n" + mod,
+		"only dots path":        "server:\n  metrics_path: /..\n" + mod,
 		"collector no value":    mod + "    collectors:\n      groups:\n",
 		"collector null name":   mod + "    collectors:\n      ~: true\n",
 		"merged null module":    "base: &b\n" + validModule,
-		"null module via merge": "modules:\n  <<: {~: {endpoint: https://pbs:8007, user: u, token_name: n, token_value: v}}\n  a:\n" + validModule,
-		"invalid utf-8 host":    "modules:\n  a:\n    endpoint: http://%FF:8007\n    user: u\n    token_name: n\n    token_value: v\n",
-		"port out of range":     "modules:\n  a:\n    endpoint: https://pbs:99999\n    user: u\n    token_name: n\n    token_value: v\n",
+		"null module via merge": "modules:\n  <<: {~: {endpoint: https://pbs:8007, user: u@pbs, token_name: n, token_value: v}}\n  a:\n" + validModule,
+		"invalid utf-8 host":    "modules:\n  a:\n    endpoint: http://%FF:8007\n    user: u@pbs\n    token_name: n\n    token_value: v\n",
+		"port out of range":     "modules:\n  a:\n    endpoint: https://pbs:99999\n    user: u@pbs\n    token_name: n\n    token_value: v\n",
 		"c1 control name":       "modules:\n  \"a\\u009b\":\n" + validModule,
+		"listen port 0":         "server:\n  listen_address: \":0\"\n" + mod,
+		"user without realm":    "defaults:\n  user: monitoring\n" + mod,
+		"user with token":       "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: a!b@pbs\n    token_name: n\n    token_value: v\n",
+		"full token id as name": "modules:\n  a:\n    endpoint: https://pbs:8007\n    user: u@pbs\n    token_name: mon@pbs!exporter\n    token_value: v\n",
 	} {
 		if _, err := ParseConfig([]byte(in)); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -181,7 +186,7 @@ func TestParseConfigErrors(t *testing.T) {
 // All errors of a config file are reported at once, attributed to the
 // section they are in.
 func TestParseConfigReportsAllErrors(t *testing.T) {
-	_, err := ParseConfig([]byte("server:\n  log_level: loud\ndefaults:\n  timeout: 0s\nmodules:\n  a:\n    user: u\n  b:\n" + validModule + "    task_limit: 0\n"))
+	_, err := ParseConfig([]byte("server:\n  log_level: loud\ndefaults:\n  timeout: 0s\nmodules:\n  a:\n    user: u\n  b:\n" + validModule + "    max_concurrency: 0\n"))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -190,7 +195,7 @@ func TestParseConfigReportsAllErrors(t *testing.T) {
 		"defaults: timeout must be greater than 0",
 		"a: endpoint is required",
 		"a: token_value or token_value_file is required",
-		"b: task_limit must be greater than 0",
+		"b: max_concurrency must be greater than 0",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%s", want, err)
@@ -220,7 +225,7 @@ func TestTokenValueFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", content, err)
 		}
-		if got := modules["a"].authorizationHeader; got != "PBSAPIToken=u@pbs!n:"+want {
+		if got := modules["a"].api.authorizationHeader; got != "PBSAPIToken=u@pbs!n:"+want {
 			t.Errorf("%q: Authorization = %q", content, got)
 		}
 	}
@@ -286,25 +291,6 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 }
 
-// The environment variables of earlier versions are reported, not used.
-func TestLegacyEnvSet(t *testing.T) {
-	for _, name := range removedEnv {
-		// restored after the test by Setenv
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := legacyEnvSet(); len(got) != 0 {
-		t.Errorf("got %v without environment variables", got)
-	}
-	t.Setenv("PBS_ENDPOINT", "https://pbs:8007")
-	t.Setenv("PBS_API_TOKEN_FILE", "/run/secrets/x")
-	if got := legacyEnvSet(); !slices.Equal(got, []string{"PBS_ENDPOINT", "PBS_API_TOKEN_FILE"}) {
-		t.Errorf("got %v", got)
-	}
-}
-
 // The example config in the repository is valid.
 func TestExampleConfig(t *testing.T) {
 	data, err := os.ReadFile("pbs-exporter.example.yml")
@@ -327,7 +313,6 @@ func TestServerSettingsValid(t *testing.T) {
 		"server:\n  metrics_path: /metrics.v2_~-\n",
 		"server:\n  listen_address: 127.0.0.1:9000\n",
 		"server:\n  listen_address: \"[::1]:10019\"\n",
-		"server:\n  listen_address: \":0\"\n",
 	} {
 		if _, err := ParseConfig([]byte(server + "modules:\n  a:\n" + validModule)); err != nil {
 			t.Errorf("%q: %v", server, err)
@@ -357,7 +342,7 @@ func TestModuleTokenFileOverridesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := modules["a"].authorizationHeader; got != "PBSAPIToken=u@pbs!n:from-file" {
+	if got := modules["a"].api.authorizationHeader; got != "PBSAPIToken=u@pbs!n:from-file" {
 		t.Errorf("Authorization = %q", got)
 	}
 }
@@ -383,6 +368,18 @@ func TestTokenFileLimits(t *testing.T) {
 	}
 }
 
+// User IDs may have an "@" in the name, the realm is after the last one.
+func TestTokenPartsValid(t *testing.T) {
+	for _, in := range []string{
+		"modules:\n  a:\n    endpoint: https://pbs:8007\n    user: john@example.com@ldap\n    token_name: n\n    token_value: v\n",
+		"modules:\n  a:\n    endpoint: https://pbs:8007\n    user: root@pam\n    token_name: exporter-1.a_b\n    token_value: v\n",
+	} {
+		if _, err := ParseConfig([]byte(in)); err != nil {
+			t.Errorf("%q: %v", in, err)
+		}
+	}
+}
+
 // A config file with token_value that others can read is reported.
 func TestSecretsExposed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
@@ -393,7 +390,7 @@ func TestSecretsExposed(t *testing.T) {
 	}{
 		{"modules:\n  a:\n" + validModule, 0o644, true},
 		{"modules:\n  a:\n" + validModule, 0o600, false},
-		{"defaults:\n  user: u\n  token_name: n\n  token_value_file: /f\nmodules:\n  a:\n    endpoint: https://pbs:8007\n", 0o644, false},
+		{"defaults:\n  user: u@pbs\n  token_name: n\n  token_value_file: /f\nmodules:\n  a:\n    endpoint: https://pbs:8007\n", 0o644, false},
 	} {
 		if err := os.WriteFile(path, []byte(tc.content), tc.mode); err != nil {
 			t.Fatal(err)

@@ -9,78 +9,61 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func hostDesc(name, help string) *prometheus.Desc {
-	return prometheus.NewDesc(prometheus.BuildFQName(promNamespace, "", name), help, nil, nil)
-}
-
 var (
-	subscription_status = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_status"),
-		"The subscription status of the host.",
-		[]string{"status"}, nil,
-	)
-	subscription_info = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_info"),
+	nodeSubscriptionInfo = newDesc("node", "subscription_info",
 		"The subscription info of the host.",
-		[]string{"productname", "status"}, nil,
-	)
-	subscription_due_timestamp_seconds = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "host_subscription_due_timestamp_seconds"),
-		"The subscription next due timestamp (unix seconds) of the host.",
-		[]string{"productname"}, nil,
-	)
-	host_cpu_usage      = hostDesc("host_cpu_usage_ratio", "The CPU usage of the host (0-1).")
-	host_memory_free    = hostDesc("host_memory_free_bytes", "The free memory of the host in bytes.")
-	host_memory_total   = hostDesc("host_memory_total_bytes", "The total memory of the host in bytes.")
-	host_memory_used    = hostDesc("host_memory_used_bytes", "The used memory of the host in bytes.")
-	host_swap_free      = hostDesc("host_swap_free_bytes", "The free swap of the host in bytes.")
-	host_swap_total     = hostDesc("host_swap_total_bytes", "The total swap of the host in bytes.")
-	host_swap_used      = hostDesc("host_swap_used_bytes", "The used swap of the host in bytes.")
-	host_disk_available = hostDesc("host_disk_available_bytes", "The available disk of the local root disk in bytes.")
-	host_disk_total     = hostDesc("host_disk_total_bytes", "The total disk of the local root disk in bytes.")
-	host_disk_used      = hostDesc("host_disk_used_bytes", "The used disk of the local root disk in bytes.")
-	host_uptime         = hostDesc("host_uptime_seconds", "The uptime of the host in seconds.")
-	host_io_wait        = hostDesc("host_io_wait_ratio", "The io wait of the host (0-1).")
-	host_load1          = hostDesc("host_load1", "The load for 1 minute of the host.")
-	host_load5          = hostDesc("host_load5", "The load for 5 minutes of the host.")
-	host_load15         = hostDesc("host_load15", "The load for 15 minutes of the host.")
+		"productname", "status")
+	nodeInfo = newDesc("node", "info",
+		"Identity of the PBS: the SHA-256 fingerprint of its TLS certificate (lower case, colon separated), always 1.",
+		"fingerprint")
+	nodeKernel = newDesc("node", "kernel_info",
+		"The running kernel of the PBS node (current-kernel of /nodes/localhost/status), always 1.",
+		"release")
+	nodeSubscriptionDue = newDesc("node", "subscription_due_timestamp_seconds",
+		"The next due date of the subscription of the node.")
+	nodeCPUUsage    = newDesc("node", "cpu_usage_ratio", "The CPU usage of the node (0-1).")
+	nodeMemoryFree  = newDesc("node", "memory_free_bytes", "The free memory of the node.")
+	nodeMemorySize  = newDesc("node", "memory_size_bytes", "The memory of the node.")
+	nodeMemoryUsed  = newDesc("node", "memory_used_bytes", "The used memory of the node.")
+	nodeSwapFree    = newDesc("node", "swap_free_bytes", "The free swap of the node.")
+	nodeSwapSize    = newDesc("node", "swap_size_bytes", "The swap of the node.")
+	nodeSwapUsed    = newDesc("node", "swap_used_bytes", "The used swap of the node.")
+	nodeRootfsAvail = newDesc("node", "rootfs_available_bytes", "The available space of the root file system of the node.")
+	nodeRootfsSize  = newDesc("node", "rootfs_size_bytes", "The size of the root file system of the node.")
+	nodeRootfsUsed  = newDesc("node", "rootfs_used_bytes", "The used space of the root file system of the node.")
+	nodeUptime      = newDesc("node", "uptime_seconds", "The uptime of the node.")
+	nodeIOWait      = newDesc("node", "io_wait_ratio", "The I/O wait of the node (0-1).")
+	nodeLoad1       = newDesc("node", "load1", "The load average of the node over 1 minute.")
+	nodeLoad5       = newDesc("node", "load5", "The load average of the node over 5 minutes.")
+	nodeLoad15      = newDesc("node", "load15", "The load average of the node over 15 minutes.")
 )
 
-// subscriptionStatuses are the values of pbs_host_subscription_status.
-var subscriptionStatuses = []string{"new", "notfound", "active", "invalid", "expired", "suspended"}
-
+// nodeStatus is /nodes/localhost/status; values it does not report are nil.
 type nodeStatus struct {
-	CPU float64 `json:"cpu"`
-	Mem struct {
-		Free  int64 `json:"free"`
-		Total int64 `json:"total"`
-		Used  int64 `json:"used"`
-	} `json:"memory"`
-	Swap struct {
-		Free  int64 `json:"free"`
-		Total int64 `json:"total"`
-		Used  int64 `json:"used"`
-	} `json:"swap"`
+	CPU  *float64     `json:"cpu"`
+	Mem  nodeCapacity `json:"memory"`
+	Swap nodeCapacity `json:"swap"`
 	Disk struct {
-		Avail int64 `json:"avail"`
-		Total int64 `json:"total"`
-		Used  int64 `json:"used"`
+		Avail *int64 `json:"avail"`
+		Total *int64 `json:"total"`
+		Used  *int64 `json:"used"`
 	} `json:"root"`
 	Load          []float64 `json:"loadavg"`
-	Uptime        int64     `json:"uptime"`
-	Wait          float64   `json:"wait"`
+	Uptime        *int64    `json:"uptime"`
+	Wait          *float64  `json:"wait"`
 	CurrentKernel struct {
 		Release string `json:"release"`
 	} `json:"current-kernel"`
+	Info struct {
+		Fingerprint string `json:"fingerprint"`
+	} `json:"info"`
 }
 
-// getNodeStatus returns /nodes/localhost/status, fetched once per scrape.
-func (s *scrapeState) getNodeStatus(ctx context.Context) (nodeStatus, error) {
-	return s.nodeStatus.get(struct{}{}, func() (nodeStatus, error) {
-		var st nodeStatus
-		err := s.api.get(ctx, apiPath("nodes", "localhost", "status"), nil, &st)
-		return st, err
-	})
+// nodeCapacity is the memory or swap of /nodes/localhost/status.
+type nodeCapacity struct {
+	Free  *int64 `json:"free"`
+	Total *int64 `json:"total"`
+	Used  *int64 `json:"used"`
 }
 
 // NOTE: According to the api documentation, we have to provide the node name (won't work with the node ip),
@@ -89,13 +72,13 @@ func (s *scrapeState) getNodeStatus(ctx context.Context) (nodeStatus, error) {
 var nodeCollector = &collector{
 	name:      "node",
 	enabled:   true,
-	privilege: "Sys.Audit on /system",
+	privilege: "Sys.Audit on /system/status, Sys.Audit on / (subscription)",
 	descs: []*prometheus.Desc{
-		subscription_status, subscription_info, subscription_due_timestamp_seconds,
-		host_cpu_usage, host_memory_free, host_memory_total, host_memory_used,
-		host_swap_free, host_swap_total, host_swap_used,
-		host_disk_available, host_disk_total, host_disk_used,
-		host_uptime, host_io_wait, host_load1, host_load5, host_load15,
+		nodeInfo, nodeKernel, nodeSubscriptionInfo, nodeSubscriptionDue,
+		nodeCPUUsage, nodeMemoryFree, nodeMemorySize, nodeMemoryUsed,
+		nodeSwapFree, nodeSwapSize, nodeSwapUsed,
+		nodeRootfsAvail, nodeRootfsSize, nodeRootfsUsed,
+		nodeUptime, nodeIOWait, nodeLoad1, nodeLoad5, nodeLoad15,
 	},
 	collect: func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
 		return errors.Join(collectNodeStatus(ctx, s, ch), collectSubscription(ctx, s, ch))
@@ -103,30 +86,33 @@ var nodeCollector = &collector{
 }
 
 func collectNodeStatus(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error {
-	st, err := s.getNodeStatus(ctx)
-	if err != nil {
+	var st nodeStatus
+	if err := s.api.get(ctx, apiPath("nodes", "localhost", "status"), nil, &st); err != nil {
 		return err
 	}
-	gauge := func(d *prometheus.Desc, v float64) {
-		ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v)
+	if fp := normalizeFingerprint(st.Info.Fingerprint); fp != "" {
+		gauge(ch, nodeInfo, 1, fp)
 	}
-	gauge(host_cpu_usage, st.CPU)
-	gauge(host_memory_free, float64(st.Mem.Free))
-	gauge(host_memory_total, float64(st.Mem.Total))
-	gauge(host_memory_used, float64(st.Mem.Used))
-	gauge(host_swap_free, float64(st.Swap.Free))
-	gauge(host_swap_total, float64(st.Swap.Total))
-	gauge(host_swap_used, float64(st.Swap.Used))
-	gauge(host_disk_available, float64(st.Disk.Avail))
-	gauge(host_disk_total, float64(st.Disk.Total))
-	gauge(host_disk_used, float64(st.Disk.Used))
-	gauge(host_uptime, float64(st.Uptime))
-	gauge(host_io_wait, st.Wait)
+	if st.CurrentKernel.Release != "" {
+		gauge(ch, nodeKernel, 1, st.CurrentKernel.Release)
+	}
+	optGauge(ch, nodeCPUUsage, st.CPU)
+	optGauge(ch, nodeMemoryFree, st.Mem.Free)
+	optGauge(ch, nodeMemorySize, st.Mem.Total)
+	optGauge(ch, nodeMemoryUsed, st.Mem.Used)
+	optGauge(ch, nodeSwapFree, st.Swap.Free)
+	optGauge(ch, nodeSwapSize, st.Swap.Total)
+	optGauge(ch, nodeSwapUsed, st.Swap.Used)
+	optGauge(ch, nodeRootfsAvail, st.Disk.Avail)
+	optGauge(ch, nodeRootfsSize, st.Disk.Total)
+	optGauge(ch, nodeRootfsUsed, st.Disk.Used)
+	optGauge(ch, nodeUptime, st.Uptime)
+	optGauge(ch, nodeIOWait, st.Wait)
 	// a missing or short loadavg would panic otherwise
 	if len(st.Load) >= 3 {
-		gauge(host_load1, st.Load[0])
-		gauge(host_load5, st.Load[1])
-		gauge(host_load15, st.Load[2])
+		gauge(ch, nodeLoad1, st.Load[0])
+		gauge(ch, nodeLoad5, st.Load[1])
+		gauge(ch, nodeLoad15, st.Load[2])
 	}
 	return nil
 }
@@ -138,7 +124,7 @@ func collectSubscription(ctx context.Context, s *scrapeState, ch chan<- promethe
 	}
 
 	statusStr := ""
-	productName := "unknown"
+	productName := ""
 	if v, ok := sub["status"]; ok && v != nil {
 		statusStr = fmt.Sprintf("%v", v)
 	}
@@ -146,22 +132,15 @@ func collectSubscription(ctx context.Context, s *scrapeState, ch chan<- promethe
 		productName = fmt.Sprintf("%v", v)
 	}
 
-	ch <- prometheus.MustNewConstMetric(subscription_info, prometheus.GaugeValue, 1, productName, statusStr)
+	gauge(ch, nodeSubscriptionInfo, 1, productName, statusStr)
 
 	// no series without a due date: 0 would read as 1970 and fire every
 	// "subscription expires soon" alert
 	if v, ok := sub["nextduedate"].(string); ok {
 		if t, err := time.Parse("2006-01-02", v); err == nil {
-			ch <- prometheus.MustNewConstMetric(subscription_due_timestamp_seconds, prometheus.GaugeValue, float64(t.Unix()), productName)
+			gauge(ch, nodeSubscriptionDue, float64(t.Unix()))
 		}
 	}
-
-	for _, st := range subscriptionStatuses {
-		val := 0.0
-		if statusStr == st {
-			val = 1
-		}
-		ch <- prometheus.MustNewConstMetric(subscription_status, prometheus.GaugeValue, val, st)
-	}
-	return nil
+	// without Sys.Audit on "/", PBS leaves out the product name and due date
+	return s.privilegeGap(ctx, permissions.canReadSubscription, errSubscriptionFiltered)
 }

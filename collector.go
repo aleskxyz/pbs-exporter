@@ -20,8 +20,10 @@ const promNamespace = "pbs"
 // that fails does not stop the others.
 type collector struct {
 	name string
-	// enabled is the default, a module can override it (except for "version").
+	// enabled is the default, a module can override it.
 	enabled bool
+	// required collectors can not be disabled.
+	required bool
 	// privilege is named in the log message when PBS answers 403.
 	privilege string
 	descs     []*prometheus.Desc
@@ -31,17 +33,12 @@ type collector struct {
 	collect func(ctx context.Context, s *scrapeState, ch chan<- prometheus.Metric) error
 }
 
-// versionCollectorName is the collector pbs_up is derived from; it can not be
-// disabled.
-const versionCollectorName = "version"
-
 // allCollectors returns every collector, in the order they are reported.
 func allCollectors() []*collector {
 	return []*collector{
 		versionCollector,
 		nodeCollector,
 		datastoresCollector,
-		snapshotsCollector,
 		groupsCollector,
 		jobsCollector,
 		syncCollector,
@@ -79,7 +76,7 @@ func validateCollectors(overrides map[string]bool) error {
 		switch {
 		case findCollector(name) == nil:
 			invalid = append(invalid, fmt.Sprintf("unknown collector %q (known: %s)", name, strings.Join(collectorNames(), ", ")))
-		case name == versionCollectorName && !on:
+		case findCollector(name).required && !on:
 			invalid = append(invalid, fmt.Sprintf("collector %q can not be disabled", name))
 		}
 	}
@@ -98,32 +95,29 @@ func enabledCollectors(overrides map[string]bool) []*collector {
 		if v, ok := overrides[c.name]; ok {
 			on = v
 		}
-		if on || c.name == versionCollectorName {
+		if on || c.required {
 			enabled = append(enabled, c)
 		}
 	}
 	return enabled
 }
 
-// memo fetches a value once per key and shares it between the collectors of a
-// scrape.
-type memo[K comparable, V any] struct {
-	mu sync.Mutex
-	m  map[K]func() (V, error)
+// shared fetches a value once and shares it between the collectors of a
+// scrape. A panic in fetch is returned as error to every caller.
+type shared[V any] struct {
+	once sync.Once
+	v    V
+	err  error
 }
 
-func (m *memo[K, V]) get(key K, fetch func() (V, error)) (V, error) {
-	m.mu.Lock()
-	f, ok := m.m[key]
-	if !ok {
-		if m.m == nil {
-			m.m = map[K]func() (V, error){}
-		}
-		f = sync.OnceValues(fetch)
-		m.m[key] = f
-	}
-	m.mu.Unlock()
-	return f()
+func (s *shared[V]) get(fetch func() (V, error)) (V, error) {
+	s.once.Do(func() {
+		s.err = recoverErr(func() (err error) {
+			s.v, err = fetch()
+			return err
+		})
+	})
+	return s.v, s.err
 }
 
 // forEach calls f for every item, at most limit at a time, and returns the
@@ -150,73 +144,64 @@ func forEach[T any](items []T, limit int, f func(T) error) error {
 // scrapeState holds the state of one scrape: the API client and the responses
 // that more than one collector uses, so that each is fetched only once.
 type scrapeState struct {
-	api    *apiClient
-	module *Module
-	// now is when the scrape started
-	now time.Time
+	api *apiClient
+	// maxConcurrency limits the concurrent items (datastores, namespaces) a
+	// collector walks; the requests themselves are limited by api.
+	maxConcurrency int
 
-	datastoreUsage memo[struct{}, []datastoreUsage]
-	datastoreList  memo[struct{}, []datastoreListItem]
-	namespaces     memo[string, []namespaceItem]
-	snapshots      memo[storeNamespace, []snapshotItem]
-	tasks          memo[struct{}, []taskItem]
-	permissions    memo[struct{}, permissions]
-	nodeStatus     memo[struct{}, nodeStatus]
+	datastoreUsage shared[[]datastoreUsage]
+	datastoreList  shared[[]datastoreListItem]
+	permissions    shared[permissions]
 }
 
-type storeNamespace struct {
-	store, ns string
+// newDesc returns the descriptor of the metric pbs_<subsystem>_<name>
+// (pbs_<name> without subsystem).
+func newDesc(subsystem, name, help string, labels ...string) *prometheus.Desc {
+	return prometheus.NewDesc(prometheus.BuildFQName(promNamespace, subsystem, name), help, labels, nil)
+}
+
+// gauge sends a gauge sample.
+func gauge(ch chan<- prometheus.Metric, d *prometheus.Desc, v float64, labels ...string) {
+	ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, labels...)
+}
+
+// optGauge sends a gauge sample if v is set.
+func optGauge[T int64 | float64](ch chan<- prometheus.Metric, d *prometheus.Desc, v *T, labels ...string) {
+	if v != nil {
+		gauge(ch, d, float64(*v), labels...)
+	}
 }
 
 var (
-	up = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "up"),
-		"Was the last query of PBS successful (the version call).",
-		nil, nil,
-	)
-	info = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "", "info"),
-		"Module and endpoint host of the scraped PBS.",
-		[]string{"module", "endpoint_host"}, nil,
-	)
-	collectorSuccess = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "collector", "success"),
+	pbsUp = newDesc("", "up",
+		"Was the last query of PBS successful (the version call).")
+	// the module is the target label Prometheus sets (see the README)
+	pbsInfo = newDesc("", "info",
+		"Endpoint host of the scraped PBS, always 1.",
+		"endpoint_host")
+	collectorSuccess = newDesc("collector", "success",
 		"Whether a collector succeeded in the last scrape.",
-		[]string{"collector"}, nil,
-	)
-	collectorDuration = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "collector", "duration_seconds"),
+		"collector")
+	collectorDuration = newDesc("collector", "duration_seconds",
 		"Duration of a collector in the last scrape.",
-		[]string{"collector"}, nil,
-	)
+		"collector")
 )
 
 type Exporter struct {
 	ctx     context.Context
 	timeout time.Duration
 	module  *Module
-	api     *apiClient
 }
 
 // NewExporter returns the collector of one scrape of the module's endpoint.
 // All PBS requests stop when ctx is done or after timeout, whichever is first.
 func NewExporter(ctx context.Context, module *Module, timeout time.Duration) *Exporter {
-	return &Exporter{
-		ctx:     ctx,
-		timeout: timeout,
-		module:  module,
-		api: &apiClient{
-			endpoint:            module.endpoint,
-			authorizationHeader: module.authorizationHeader,
-			client:              module.client,
-			sem:                 module.sem,
-		},
-	}
+	return &Exporter{ctx: ctx, timeout: timeout, module: module}
 }
 
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	ch <- up
-	ch <- info
+	ch <- pbsUp
+	ch <- pbsInfo
 	ch <- collectorSuccess
 	ch <- collectorDuration
 	// collectors may share descriptors (e.g. the job metrics of jobs and
@@ -236,7 +221,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(e.ctx, e.timeout)
 	defer cancel()
 
-	s := &scrapeState{api: e.api, module: e.module, now: time.Now()}
+	s := &scrapeState{api: e.module.api, maxConcurrency: e.module.maxConcurrency}
 	collectors := e.module.collectors
 	errs := make([]error, len(collectors))
 	durations := make([]time.Duration, len(collectors))
@@ -260,14 +245,15 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 				attrs = append(attrs, "required_privilege", c.privilege)
 			}
 			slog.Warn("collector failed", attrs...)
-		} else if c.name == versionCollectorName {
+		} else if c == versionCollector {
+			// pbs_up is derived from the version call
 			upValue = 1
 		}
-		ch <- prometheus.MustNewConstMetric(collectorSuccess, prometheus.GaugeValue, success, c.name)
-		ch <- prometheus.MustNewConstMetric(collectorDuration, prometheus.GaugeValue, durations[i].Seconds(), c.name)
+		gauge(ch, collectorSuccess, success, c.name)
+		gauge(ch, collectorDuration, durations[i].Seconds(), c.name)
 	}
-	ch <- prometheus.MustNewConstMetric(up, prometheus.GaugeValue, upValue)
-	ch <- prometheus.MustNewConstMetric(info, prometheus.GaugeValue, 1, e.module.name, e.module.host)
+	gauge(ch, pbsUp, upValue)
+	gauge(ch, pbsInfo, 1, e.module.host)
 }
 
 // runCollector runs c. A panic becomes an error, so a bad PBS answer can not

@@ -2,22 +2,17 @@ package main
 
 import (
 	"context"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
-	diskSmartStatus = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "disk", "smart_status"),
+	diskSmartStatus = newDesc("disk", "smart_status",
 		"SMART health of a disk as PBS reports it (status passed, failed or unknown), always 1.",
-		[]string{"disk", "model", "serial", "status"}, nil,
-	)
-	diskWearout = prometheus.NewDesc(
-		prometheus.BuildFQName(promNamespace, "disk", "wearout_ratio"),
-		"Used up share of the SSD's rated life (0 = new, 1 = worn out), as the PBS web interface shows it; omitted when PBS reports none.",
-		[]string{"disk"}, nil,
-	)
+		"disk", "model", "serial", "status")
+	diskWearout = newDesc("disk", "wearout_percent",
+		"The wearout field PBS reports for the disk: the remaining rated life of an SSD in percent (100 = new); omitted when PBS reports none.",
+		"disk")
 )
 
 // diskItem is an entry of /nodes/localhost/disks/list.
@@ -41,14 +36,8 @@ var disksCollector = &collector{
 			return err
 		}
 		for _, d := range disks {
-			status := strings.ToLower(d.Status)
-			if status == "" {
-				status = "unknown"
-			}
-			ch <- prometheus.MustNewConstMetric(diskSmartStatus, prometheus.GaugeValue, 1, d.Name, d.Model, d.Serial, status)
-			if d.Wearout != nil {
-				ch <- prometheus.MustNewConstMetric(diskWearout, prometheus.GaugeValue, (100-*d.Wearout)/100, d.Name)
-			}
+			gauge(ch, diskSmartStatus, 1, d.Name, d.Model, d.Serial, d.Status)
+			optGauge(ch, diskWearout, d.Wearout, d.Name)
 		}
 		return nil
 	},

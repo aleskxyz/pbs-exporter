@@ -26,11 +26,9 @@ defaults:
   timeout: 15s               # timeout of each request to the PBS (default 5s)
   # insecure: false          # true skips TLS certificate verification
   # max_concurrency: 4       # concurrent requests to one PBS
-  # task_lookback: 192h      # how far back the task log is read
-  # task_limit: 10000        # maximum number of tasks read from the task log
   # Collectors are switched on (true) or off (false); unlisted collectors keep
   # their default. On by default: version (can not be switched off), node,
-  # datastores, snapshots, groups, jobs, sync, tasks, zfs, time, apt.
+  # datastores, groups, jobs, sync, tasks, zfs, time, apt.
   # Off by default: access, disks.
   collectors:
     access: true

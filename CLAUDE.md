@@ -160,8 +160,8 @@ go install github.com/securego/gosec/v2/cmd/gosec@latest
 gosec ./...
 ```
 
-**Log injection (G706):** Any user-controlled value passed to `log.Printf` must be sanitised before use. Use `strings.ReplaceAll` (gosec-recognised sanitizer) to strip newlines — `strings.NewReplacer(...).Replace(...)` looks equivalent but is **not** on gosec's sanitizer list and will still trigger G706:
+**Log injection (G706):** Any user-controlled value passed to the logger (`log/slog`) must be sanitised before use. Use the helpers in [log.go](log.go): `sanitize` for values, `errText` for errors. They use `strings.ReplaceAll` (gosec-recognised sanitizer) to strip newlines — `strings.NewReplacer(...).Replace(...)` looks equivalent but is **not** on gosec's sanitizer list and will still trigger G706:
 
 ```go
-log.Printf("... %s", strings.ReplaceAll(strings.ReplaceAll(userInput, "\n", ""), "\r", ""))
+slog.Warn("...", "datastore", sanitize(store), "err", errText(err))
 ```

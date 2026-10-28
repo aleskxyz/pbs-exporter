@@ -8,12 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/sync/semaphore"
 )
@@ -72,17 +69,15 @@ func errorMessage(body []byte) string {
 	if json.Unmarshal(body, &resp) == nil && resp.Message != "" {
 		msg = resp.Message
 	}
-	msg = strings.TrimSpace(sanitize(msg))
+	msg = strings.TrimSpace(strings.ToValidUTF8(sanitize(msg), ""))
 	if len(msg) > maxErrorMessage {
+		// a rune cut in half is dropped
 		msg = strings.ToValidUTF8(msg[:maxErrorMessage], "") + "…"
-	}
-	if !utf8.ValidString(msg) {
-		msg = strings.ToValidUTF8(msg, "")
 	}
 	return msg
 }
 
-// apiClient makes the requests of one scrape to one PBS.
+// apiClient makes the requests to the PBS of one module, for all its scrapes.
 type apiClient struct {
 	endpoint            string
 	authorizationHeader string
@@ -94,39 +89,8 @@ type apiClient struct {
 // get requests path with the query q and decodes the "data" field of the
 // answer into out.
 func (c *apiClient) get(ctx context.Context, path string, q url.Values, out any) error {
-	_, _, err := c.getTimed(ctx, path, q, out)
-	return err
-}
-
-// requestTimes records when the request got its connection (after DNS,
-// TCP connect and TLS handshake) and when the first byte of the answer
-// arrived; the hooks run in the transport's goroutines.
-type requestTimes struct {
-	mu                 sync.Mutex
-	gotConn, firstByte time.Time
-}
-
-func (rt *requestTimes) trace() *httptrace.ClientTrace {
-	return &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) {
-			rt.mu.Lock()
-			rt.gotConn = time.Now()
-			rt.mu.Unlock()
-		},
-		GotFirstResponseByte: func() {
-			rt.mu.Lock()
-			rt.firstByte = time.Now()
-			rt.mu.Unlock()
-		},
-	}
-}
-
-// getTimed is get that also returns when the request was sent and when the
-// answer arrived. Neither waiting for a free request slot nor connecting
-// (DNS, TCP, TLS handshake) counts.
-func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out any) (sent, received time.Time, err error) {
 	if err := c.sem.Acquire(ctx, 1); err != nil {
-		return sent, received, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	defer c.sem.Release(1)
 
@@ -134,25 +98,18 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	var times requestTimes
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, times.trace()), http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return sent, received, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	req.Header.Set("Authorization", c.authorizationHeader)
 
 	slog.Debug("request", "url", sanitize(u))
-	sent = time.Now()
+	sent := time.Now()
 	resp, err := c.client.Do(req)
-	received = time.Now()
 	if err != nil {
-		return sent, received, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
-	times.mu.Lock()
-	if !times.gotConn.IsZero() && !times.firstByte.Before(times.gotConn) {
-		sent, received = times.gotConn, times.firstByte
-	}
-	times.mu.Unlock()
 	defer func() {
 		// read what is left, so the connection can be reused
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
@@ -160,19 +117,25 @@ func (c *apiClient) getTimed(ctx context.Context, path string, q url.Values, out
 			slog.Debug("closing response body", "err", sanitize(err.Error()))
 		}
 	}()
-	slog.Debug("response", "url", sanitize(u), "status", resp.StatusCode, "ttfb", received.Sub(sent))
+	slog.Debug("response", "url", sanitize(u), "status", resp.StatusCode, "duration", time.Since(sent))
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		return sent, received, &APIError{Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
+		return &APIError{Path: path, Status: resp.StatusCode, Message: errorMessage(body)}
 	}
 
-	// the "data" field is decoded straight into out
-	envelope := struct {
-		Data any `json:"data"`
-	}{Data: out}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return sent, received, fmt.Errorf("%s: decoding response: %w", path, err)
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
 	}
-	return sent, received, nil
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("%s: decoding response: %w", path, err)
+	}
+	// an answer without data must not read as an empty list or zero values
+	if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
+		return fmt.Errorf("%s: the response has no data", path)
+	}
+	if err := json.Unmarshal(envelope.Data, out); err != nil {
+		return fmt.Errorf("%s: decoding response: %w", path, err)
+	}
+	return nil
 }
